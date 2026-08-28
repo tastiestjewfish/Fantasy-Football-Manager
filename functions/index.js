@@ -378,7 +378,7 @@ app.get("/api/nfl/league", (req, res) => {
 app.get("/", (req, res) => res.json({ ok: true, service: "league-hq-api", platforms: ["sleeper", "yahoo", "espn", "nfl(manual)", "ai"] }));
 
 function startLocal() {
-  const server = app.listen(PORT, () => console.log(`League HQ API on http://localhost:${PORT}`));
+  const server = app.listen(PORT, "0.0.0.0", () => console.log(`League HQ API on http://0.0.0.0:${PORT}`));
   server.on("error", (err) => {
     if (err.code === "EADDRINUSE") {
       console.log(`Port ${PORT} already in use — reusing the API that is already running.`);

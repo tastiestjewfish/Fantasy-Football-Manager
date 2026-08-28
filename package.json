@@ -10,7 +10,8 @@
     "build": "vite build",
     "lint": "oxlint",
     "preview": "vite preview",
-    "start": "node functions/index.js"
+    "start": "node apphosting-server.js",
+    "start:api": "node functions/index.js"
   },
   "engines": {
     "node": ">=18"

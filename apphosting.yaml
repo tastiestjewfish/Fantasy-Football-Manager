@@ -1,0 +1,4 @@
+# Firebase App Hosting — Cloud Run must listen on 0.0.0.0:$PORT (8080).
+scripts:
+  buildCommand: npm run build
+  runCommand: node apphosting-server.js

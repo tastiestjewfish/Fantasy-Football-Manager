@@ -424,7 +424,7 @@ function advisorError(e) {
     return "The advisor didn't accept your sign-in. Refresh the page, then try Do this for me again.";
   }
   if (/anthropic-workspace-id/i.test(m)) {
-    return "This Anthropic key is tied to a Claude workspace. In console.anthropic.com go to Settings → Workspaces, copy the ID (starts with wrkspc_) and send it here — or create an API key scoped to a single workspace.";
+    return "This Anthropic key is tied to a Claude workspace. Open https://console.anthropic.com/settings/workspaces — the ID column looks like wrkspc_01…. Paste that in Settings, or create an API key scoped to one workspace so you can skip the ID.";
   }
   if (/authentication_error|invalid x-api-key|ANTHROPIC_API_KEY/i.test(m)) {
     return "The Anthropic API key on the server is missing or invalid. In Google Cloud Secret Manager, open ANTHROPIC_API_KEY and add a new version with your sk-ant- key (don't create a new secret).";
@@ -1281,7 +1281,7 @@ function AnthropicWorkspaceCard() {
     <div className="card">
       <h3>Anthropic workspace</h3>
       <div className="empty" style={{ paddingTop: 0 }}>
-        Identity-linked API keys need a workspace ID. Copy it from console.anthropic.com → Settings → Workspaces (starts with <b>wrkspc_</b>). Or create a key that's scoped to one workspace and skip this.
+        Open <b>console.anthropic.com → Settings → Workspaces</b> (not claude.ai). Copy the ID column — it starts with <b>wrkspc_</b>. Or create an API key scoped to one workspace and you can leave this blank.
       </div>
       <div className="remctl" style={{ marginTop: 10 }}>
         <input
