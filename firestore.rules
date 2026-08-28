@@ -1,0 +1,46 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function isUser(userId) {
+      return signedIn() && request.auth.uid == userId;
+    }
+
+    function isWorkspaceMember(workspaceId) {
+      return signedIn()
+        && exists(/databases/$(database)/documents/workspaces/$(workspaceId)/members/$(request.auth.uid));
+    }
+
+    // Personal profile: remembered workspace code, etc.
+    match /profiles/{userId} {
+      allow read, write: if isUser(userId);
+    }
+
+    match /workspaces/{workspaceId} {
+      // Optional workspace metadata. First joiner may create it; only members read it.
+      allow create: if signedIn();
+      allow read: if isWorkspaceMember(workspaceId);
+      allow update, delete: if isWorkspaceMember(workspaceId);
+
+      // Joining is writing your own member doc. Knowing the workspace code is the invite.
+      match /members/{userId} {
+        allow create, update, delete: if isUser(userId);
+        allow read: if isUser(userId) || isWorkspaceMember(workspaceId);
+      }
+
+      // Shared league data (draft board, reminders, members list, …)
+      match /shared/{docId} {
+        allow read, write: if isWorkspaceMember(workspaceId);
+      }
+
+      // Per-user keys inside a workspace (onboarding, etc.)
+      match /users/{userId}/kv/{docId} {
+        allow read, write: if isUser(userId) && isWorkspaceMember(workspaceId);
+      }
+    }
+  }
+}
