@@ -2,3 +2,25 @@
 scripts:
   buildCommand: npm run build
   runCommand: node apphosting-server.js
+
+env:
+  - variable: ANTHROPIC_API_KEY
+    secret: ANTHROPIC_API_KEY
+    availability:
+      - RUNTIME
+  - variable: VITE_FIREBASE_API_KEY
+    value: AIzaSyDxq12XaiJgWNGIZdIoCduvLkjxSCbT53c
+    availability:
+      - BUILD
+  - variable: VITE_FIREBASE_AUTH_DOMAIN
+    value: fantasy-football-manager-210cc.firebaseapp.com
+    availability:
+      - BUILD
+  - variable: VITE_FIREBASE_PROJECT_ID
+    value: fantasy-football-manager-210cc
+    availability:
+      - BUILD
+  - variable: VITE_FIREBASE_APP_ID
+    value: 1:710899148846:web:3692d6f753f6c9c2f197bf
+    availability:
+      - BUILD

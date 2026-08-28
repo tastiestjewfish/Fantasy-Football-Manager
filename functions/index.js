@@ -11,11 +11,7 @@ require("dotenv").config({ path: path.join(__dirname, ".secret.local") });
 const express = require("express");
 const cors = require("cors");
 const admin = require("firebase-admin");
-const { onRequest } = require("firebase-functions/v2/https");
-const { defineSecret } = require("firebase-functions/params");
 const functionsV1 = require("firebase-functions/v1");
-
-const anthropicApiKey = defineSecret("ANTHROPIC_API_KEY");
 
 function resolveProjectId() {
   if (process.env.GCLOUD_PROJECT || process.env.FIREBASE_PROJECT_ID) {
@@ -392,23 +388,12 @@ function startLocal() {
 
 exports.app = app;
 exports.startLocal = startLocal;
-const fnOpts = {
-  region: "us-central1",
-  cors: true,
-  timeoutSeconds: 120,
-  memory: "512MiB",
-  secrets: [anthropicApiKey],
-  invoker: "public",
-};
-// Keep `api` and `leagueapi` exported so a full deploy does not try to delete stuck leftovers.
-exports.api = onRequest(fnOpts, app);
-exports.leagueapi = onRequest(fnOpts, app);
-// New name: Cloud Run IAM on the older functions returns 403, and their updates 409.
-exports.advisor = onRequest(fnOpts, app);
-exports.hqapi = onRequest(fnOpts, app);
-exports.liveai = onRequest(fnOpts, app);
 // 1st gen avoids Cloud Run IAM 403s that block every 2nd-gen HTTPS function in this project.
 exports.hqv1 = functionsV1
+  .region("us-central1")
+  .runWith({ timeoutSeconds: 120, memory: "512MB", secrets: ["ANTHROPIC_API_KEY"], invoker: "public" })
+  .https.onRequest(app);
+exports.hqlive = functionsV1
   .region("us-central1")
   .runWith({ timeoutSeconds: 120, memory: "512MB", secrets: ["ANTHROPIC_API_KEY"], invoker: "public" })
   .https.onRequest(app);
