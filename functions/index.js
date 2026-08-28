@@ -99,6 +99,8 @@ app.post("/api/ai", async (req, res) => {
       "x-api-key": key,
       "anthropic-version": "2023-06-01",
     };
+    const workspaceId = String(process.env.ANTHROPIC_WORKSPACE_ID || body.workspaceId || "").trim();
+    if (workspaceId) headers["anthropic-workspace-id"] = workspaceId;
     const betas = [];
     if (payload.tools) betas.push("web-search-2025-03-05");
     if (payload.mcp_servers) betas.push("mcp-client-2025-04-04");
@@ -403,6 +405,8 @@ exports.api = onRequest(fnOpts, app);
 exports.leagueapi = onRequest(fnOpts, app);
 // New name: Cloud Run IAM on the older functions returns 403, and their updates 409.
 exports.advisor = onRequest(fnOpts, app);
+exports.hqapi = onRequest(fnOpts, app);
+exports.liveai = onRequest(fnOpts, app);
 // 1st gen avoids Cloud Run IAM 403s that block every 2nd-gen HTTPS function in this project.
 exports.hqv1 = functionsV1
   .region("us-central1")

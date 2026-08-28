@@ -49,7 +49,7 @@
       {
         "source": "/api/**",
         "function": {
-          "functionId": "leagueapi",
+          "functionId": "liveai",
           "region": "us-central1"
         }
       },

@@ -385,10 +385,27 @@ function downloadICS(title, start, opts = {}) {
 }
 
 /* ---------- Anthropic API (proxied through same-origin /api/ai) ---------- */
+function getAnthropicWorkspaceId() {
+  try { return (localStorage.getItem("leaguehq:anthropicWorkspaceId") || "").trim(); } catch { return ""; }
+}
+function setAnthropicWorkspaceId(id) {
+  try {
+    const v = String(id || "").trim();
+    if (v) localStorage.setItem("leaguehq:anthropicWorkspaceId", v);
+    else localStorage.removeItem("leaguehq:anthropicWorkspaceId");
+  } catch {}
+}
 async function callClaude(messages, extra = {}) {
+  const workspaceId = getAnthropicWorkspaceId();
   const res = await apiFetch("/api/ai", {
     method: "POST",
-    body: JSON.stringify({ model: "claude-sonnet-4-6", max_tokens: extra.max_tokens || 2000, messages, ...extra }),
+    body: JSON.stringify({
+      model: "claude-sonnet-4-6",
+      max_tokens: extra.max_tokens || 2000,
+      messages,
+      ...extra,
+      ...(workspaceId ? { workspaceId } : {}),
+    }),
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
@@ -405,6 +422,9 @@ function advisorError(e) {
   const m = errText(e);
   if (/401|Sign in required|expired sign-in/i.test(m)) {
     return "The advisor didn't accept your sign-in. Refresh the page, then try Do this for me again.";
+  }
+  if (/anthropic-workspace-id/i.test(m)) {
+    return "This Anthropic key is tied to a Claude workspace. In console.anthropic.com go to Settings → Workspaces, copy the ID (starts with wrkspc_) and send it here — or create an API key scoped to a single workspace.";
   }
   if (/authentication_error|invalid x-api-key|ANTHROPIC_API_KEY/i.test(m)) {
     return "The Anthropic API key on the server is missing or invalid. In Google Cloud Secret Manager, open ANTHROPIC_API_KEY and add a new version with your sk-ant- key (don't create a new secret).";
@@ -1254,6 +1274,30 @@ function Inbox({ alerts, setAlerts, me, sources }) {
 }
 
 /* ---------- Reminders ---------- */
+function AnthropicWorkspaceCard() {
+  const [id, setId] = useState(getAnthropicWorkspaceId);
+  const save = () => setAnthropicWorkspaceId(id);
+  return (
+    <div className="card">
+      <h3>Anthropic workspace</h3>
+      <div className="empty" style={{ paddingTop: 0 }}>
+        Identity-linked API keys need a workspace ID. Copy it from console.anthropic.com → Settings → Workspaces (starts with <b>wrkspc_</b>). Or create a key that's scoped to one workspace and skip this.
+      </div>
+      <div className="remctl" style={{ marginTop: 10 }}>
+        <input
+          value={id}
+          onChange={(e) => setId(e.target.value)}
+          onBlur={save}
+          placeholder="wrkspc_…"
+          autoComplete="off"
+          spellCheck={false}
+          style={{ minWidth: 220, flex: 1 }}
+        />
+        <button className="btn ghost sm" onClick={save}>Save</button>
+      </div>
+    </div>
+  );
+}
 function Reminders({ rem, setRem, deadlines, cfg, alertsOn, notifPerm, enableAlerts, testAlert }) {
   const set = (patch) => setRem({ ...rem, ...patch });
 
@@ -1330,6 +1374,8 @@ function Reminders({ rem, setRem, deadlines, cfg, alertsOn, notifPerm, enableAle
           Countdowns turn <span style={{ color: "var(--soon)", fontWeight: 700 }}>amber</span> under 24h and <span style={{ color: "var(--now)", fontWeight: 700 }}>red</span> under 3h. Defaults suit a Sunday-slate league — adjust the day and time to your rules.
         </div>
       </div>
+
+      <AnthropicWorkspaceCard />
     </div>
   );
 }
