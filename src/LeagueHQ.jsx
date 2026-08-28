@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import storage from "./storage";
 import { getWorkspaceId } from "./firebase";
-import { apiFetch, apiJson } from "./api";
+import { apiFetch, apiJson, errText, errFromApiBody } from "./api";
 import { importSleeperLeague, sleeperNextOpponentDirect, nflSeasonClock } from "./sleeper";
 import { connectGmail, fetchGmailMessages, hasGmailToken, messagesToDump, parsePastedMail, triageLocal } from "./gmail";
 
@@ -393,21 +393,24 @@ async function callClaude(messages, extra = {}) {
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
     if (res.status === 403 || res.status === 404 || res.status === 502) {
-      throw new Error("Advisor is offline (API " + res.status + ")");
+      throw new Error(errFromApiBody(data, "Advisor is offline (API " + res.status + ")"));
     }
-    throw new Error(data.error || ("API " + res.status));
+    throw new Error(errFromApiBody(data, "API " + res.status));
   }
   const text = (data.content || []).filter((b) => b.type === "text").map((b) => b.text).join("\n");
-  if (!text) throw new Error(data.error || "Advisor returned an empty reply");
+  if (!text) throw new Error(errFromApiBody(data, "Advisor returned an empty reply"));
   return text;
 }
 function advisorError(e) {
-  const m = String((e && e.message) || e || "");
+  const m = errText(e);
   if (/401|Sign in required|expired sign-in/i.test(m)) {
-    return "The advisor didn't accept your sign-in token. Refresh the page, then try Do this for me again.";
+    return "The advisor didn't accept your sign-in. Refresh the page, then try Do this for me again.";
   }
-  if (/offline|403|404|502|Failed to fetch|NetworkError|API 5/i.test(m)) {
-    return "The advisor isn't reachable (the cloud API is blocked or still updating). Roster tools still work.";
+  if (/authentication_error|invalid x-api-key|ANTHROPIC_API_KEY/i.test(m)) {
+    return "The Anthropic API key on the server is missing or invalid. In Google Cloud Secret Manager, open ANTHROPIC_API_KEY and add a new version with your sk-ant- key (don't create a new secret).";
+  }
+  if (/offline|403|404|502|Failed to fetch|NetworkError/i.test(m)) {
+    return "The advisor isn't reachable right now. Roster tools still work.";
   }
   return m || "Couldn't reach the advisor.";
 }
@@ -1741,11 +1744,11 @@ function RosterBuilder({ cfg, slots, board, setBoard, members, saved, setSaved }
       if (!j || !Array.isArray(j.roster) || !j.roster.length) throw new Error("empty");
       setRes(j);
       setAssign(fullSlots.map((s, i) => (j.roster[i] && j.roster[i].player) ? j.roster[i].player : null));
-    } catch {
+    } catch (e) {
       const local = localRoster(cfg, fullSlots);
       setRes(local);
       setAssign(fullSlots.map((s, i) => (local.roster[i] && local.roster[i].player) ? local.roster[i].player : null));
-      setNote("Live sources weren't reachable just now, so this is built from League HQ's cached 2026 consensus ADP. Tap Build optimal roster again to retry live.");
+      setNote(advisorError(e) + " Using League HQ's cached 2026 consensus ADP until live advice works.");
     }
     setBusy(false);
   };
@@ -1921,7 +1924,7 @@ function Lineup({ cfg, board, members, slots, setSlots, saved, setSaved }) {
         body: JSON.stringify({ teamKey: meMember.teamKey, players: [...starters, ...benchP] }),
       });
       const j = await r.json().catch(() => ({}));
-      if (!r.ok || j.error) throw new Error(j.error || ("HTTP " + r.status));
+      if (!r.ok || j.error) throw new Error(errFromApiBody(j, "HTTP " + r.status));
       setSubMsg("Submitted to Yahoo" + (j.week ? " for week " + j.week : "") + ".");
       setSaved({ assign, meta, submitted: true, at: Date.now() }); setSubmitted(true);
     } catch (e) { setSubErr("Couldn't submit to Yahoo: " + e.message + ". Check that your Yahoo app has write access and you're connected."); }

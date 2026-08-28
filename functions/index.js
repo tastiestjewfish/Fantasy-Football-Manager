@@ -110,6 +110,11 @@ app.post("/api/ai", async (req, res) => {
       body: JSON.stringify(payload),
     });
     const data = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      const raw = data && data.error;
+      const msg = (raw && (raw.message || raw.type)) || data.message || ("Anthropic " + r.status);
+      return res.status(r.status).json({ error: typeof msg === "string" ? msg : String(msg) });
+    }
     res.status(r.status).json(data);
   } catch (e) {
     res.status(502).json({ error: "Anthropic request failed: " + e.message });
