@@ -82,12 +82,16 @@ export async function importSleeperLeague(leagueId) {
     notes: "",
   }));
 
+  const positions = league.roster_positions || [];
+  const superflex = positions.includes("SUPER_FLEX") || positions.filter((p) => p === "QB").length >= 2;
+
   return {
     members,
     league: {
       name: String(league.name || "").trim(),
       teams: league.total_rosters || (league.settings && league.settings.num_teams) || members.length,
       scoring: scoringLabel(league),
+      format: superflex ? "Superflex / 2-QB" : "Standard (1 QB)",
       leagueId: id,
     },
   };

@@ -216,6 +216,16 @@ const CSS = `
 .obf label{display:block;font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);font-weight:700;margin-bottom:5px}
 .obf input,.obf select{width:100%;background:var(--panel2);color:var(--ink);border:1px solid var(--line);border-radius:9px;padding:10px 11px;font-size:14px}
 .obf .hint{font-size:12px;color:var(--muted2);margin-top:4px}
+.obcode{font-family:var(--mono);font-size:16px;font-weight:700;letter-spacing:.04em;background:var(--panel2);
+  border:1px solid var(--line);border-radius:10px;padding:12px 14px;margin:4px 0 12px}
+.obteam{display:flex;justify-content:space-between;align-items:center;gap:12px;width:100%;
+  text-align:left;background:var(--panel2);border:1px solid var(--line);border-radius:10px;
+  padding:12px 14px;margin-bottom:8px;color:var(--ink)}
+.obteam .tn{font-weight:800;font-size:14px}
+.obteam .sub{font-size:12px;color:var(--muted);margin-top:3px;font-weight:500}
+.obteam .mark{flex:none;font-size:12px;font-weight:800;color:var(--muted)}
+.obteam.on{border-color:var(--brand);background:var(--goDim)}
+.obteam.on .mark{color:var(--go)}
 @media (prefers-reduced-motion:reduce){.obcard{animation:none}}
 
 /* trades + league */
@@ -527,6 +537,34 @@ async function importViaApi(platform, leagueId) {
     rosterId: m.rosterId, roster: Array.isArray(m.roster) ? m.roster : [], notes: "", mine: !!m.mine,
   }));
 }
+/** Same import path the League tab uses — Sleeper client import, otherwise /api/{platform}/league. */
+async function runLeagueImport(platform, leagueId, cfg) {
+  const p = platform || "Sleeper";
+  const id = String(leagueId || "").trim();
+  if (p === "Sleeper") {
+    const result = await importSleeper(id);
+    return {
+      members: result.members,
+      cfg: {
+        ...cfg,
+        platform: p,
+        leagueId: id,
+        league: result.league.name || cfg.league,
+        teams: result.league.teams || cfg.teams,
+        scoring: result.league.scoring || cfg.scoring,
+        format: result.league.format || cfg.format,
+      },
+    };
+  }
+  const members = await importViaApi(p.toLowerCase(), id);
+  return { members, cfg: { ...cfg, platform: p, leagueId: id } };
+}
+function leagueImportError(platform, e) {
+  if (platform === "Sleeper") {
+    return "Couldn't import from Sleeper. Check the league ID and try again." + (e && e.message ? " (" + e.message + ")" : "");
+  }
+  return (e && e.message) ? e.message : "Couldn't import this league. For Yahoo, connect your account first, then import.";
+}
 function activeRoster(members, board) {
   const me = (members || []).find((m) => m.mine && m.roster && m.roster.length);
   if (me) return me.roster.map((p) => ({ name: p.name, pos: p.pos, team: p.team, bye: TEAM_BYE[p.team], playerKey: p.playerKey }));
@@ -815,7 +853,7 @@ export default function LeagueHQ({ user, onSignOut }) {
             ))}
           </div>
         )}
-        {tab === "coach" && (
+        {tab === "coach" && onboarded && (
           <Coach cfg={cfg} board={board} members={members} slots={slots} go={go} nextDeadline={nextDeadline} />
         )}
         {tab === "home" && (
@@ -873,118 +911,183 @@ export default function LeagueHQ({ user, onSignOut }) {
       </main>
 
       {toast && <Toast toast={toast} onClose={() => setToast(null)} />}
-      {!onboarded && <Onboarding cfg={cfg} setCfg={persistCfg} sources={sources} onDone={completeOnboarding} />}
+      {!onboarded && (
+        <Onboarding
+          cfg={cfg}
+          setCfg={persistCfg}
+          members={members}
+          setMembers={persistMembers}
+          setSlots={persistSlots}
+          onDone={completeOnboarding}
+          goCoach={() => setTab("coach")}
+        />
+      )}
     </div>
   );
 }
 
 /* ---------- Onboarding (first run) ---------- */
-function Onboarding({ cfg, setCfg, sources, onDone }) {
+function Onboarding({ cfg, setCfg, members, setMembers, setSlots, onDone, goCoach }) {
   const [step, setStep] = useState(0);
-  const [gmailOk, setGmailOk] = useState(() => hasGmailToken());
-  const [src, setSrc] = useState(sources);
-  const [lg, setLg] = useState(cfg);
-  const total = 4;
-  const next = () => setStep((s) => Math.min(s + 1, total - 1));
+  const [platform, setPlatform] = useState(cfg.platform || "Sleeper");
+  const [leagueId, setLeagueId] = useState(cfg.leagueId || "");
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState("");
+  const [importOk, setImportOk] = useState(false);
+  const total = 6;
+  const workspace = getWorkspaceId();
+  const isSleeper = platform === "Sleeper";
+  const hasTeams = (members || []).length > 0;
+  const hasMine = (members || []).some((m) => m.mine);
+  const teamCountOpts = [...new Set([8, 10, 12, 14, Number(cfg.teams)].filter((n) => n > 0))].sort((a, b) => a - b);
+
+  const next = () => {
+    if (step === 2) setCfg({ ...cfg, platform, leagueId });
+    setStep((s) => Math.min(s + 1, total - 1));
+  };
   const back = () => setStep((s) => Math.max(s - 1, 0));
-  const finish = () => { setCfg(lg); onDone(src); };
-  const sf = (patch) => setSrc({ ...src, ...patch });
-  const lf = (patch) => setLg({ ...lg, ...patch });
+  const set = (patch) => {
+    const nextCfg = { ...cfg, ...patch };
+    setCfg(nextCfg);
+    if (patch.format) setSlots(defaultSlots(patch.format));
+  };
+  const setMine = (i) => setMembers((members || []).map((m, j) => ({ ...m, mine: j === i })));
+
+  const doImport = async () => {
+    setBusy(true); setMsg(""); setImportOk(false);
+    try {
+      const result = await runLeagueImport(platform, leagueId, cfg);
+      setMembers(result.members);
+      setCfg(result.cfg);
+      if (result.cfg.format && result.cfg.format !== cfg.format) setSlots(defaultSlots(result.cfg.format));
+      const withRosters = result.members.filter((x) => x.roster && x.roster.length).length;
+      setMsg("Imported " + result.members.length + " managers" + (withRosters ? " with live rosters" : "") + " ✓");
+      setImportOk(true);
+      setStep(3);
+    } catch (e) {
+      setCfg({ ...cfg, platform, leagueId });
+      setMsg(leagueImportError(platform, e));
+    }
+    setBusy(false);
+  };
+
+  const finish = () => {
+    onDone();
+    goCoach();
+  };
+
+  const canNext = step !== 3 || !hasTeams || hasMine;
 
   return (
-    <div className="ob" role="dialog" aria-modal="true">
+    <div className="ob" role="dialog" aria-modal="true" aria-labelledby="ob-title">
       <div className="obcard">
         <div className="obsteps">{Array.from({ length: total }).map((_, i) => <span key={i} className={"obdot " + (i <= step ? "on" : "")} />)}</div>
+        <div className="obstepnum">Step {step + 1} of {total}</div>
 
         {step === 0 && (
           <>
-            <div className="obstepnum">Getting set up</div>
-            <h2>Welcome to League HQ</h2>
-            <div className="lead">Your shared command center for <b>{cfg.league}</b>. It watches your inbox for roster-relevant news, helps you draft, and makes sure you never miss a lineup lock or trade window.</div>
-            <ol>
-              <li>Connect your email so League HQ can flag what matters.</li>
-              <li>Point it at your league's senders and keywords.</li>
-              <li>Confirm your league details.</li>
-            </ol>
-            <div className="note">Each manager runs this once on their own device — your co-manager does the same steps signed into their own account.</div>
+            <h2 id="ob-title">Welcome to League HQ</h2>
+            <div className="lead">Three quick steps and your team runs itself.</div>
+            <div className="note">After this, the <b>Coach</b> screen just tells you what to do each week.</div>
           </>
         )}
 
         {step === 1 && (
           <>
-            <div className="obstepnum">Connect your email</div>
-            <h2>Let League HQ read your inbox</h2>
-            <div className="lead">Inbox scans pull trade offers, injury news, and league messages out of your Gmail. You can also paste emails later if you skip this.</div>
-            <button
-              type="button"
-              className="btn"
-              style={{ width: "auto" }}
-              disabled={gmailOk}
-              onClick={async () => {
-                try {
-                  await connectGmail();
-                  setGmailOk(true);
-                } catch {
-                  setGmailOk(false);
-                }
-              }}
-            >{gmailOk ? "Gmail connected" : "Connect Gmail"}</button>
-            <label className="obchk">
-              <input type="checkbox" checked={gmailOk} onChange={(e) => setGmailOk(e.target.checked)} />
-              <span>I've connected Gmail (or I'll paste emails under League → Inbox).</span>
-            </label>
-            <div className="note">Read-only. If Google shows an unverified-app warning, use Advanced → continue. You can skip and paste mail anytime from the Inbox tab.</div>
+            <h2 id="ob-title">Your workspace code</h2>
+            <div className="lead">This is a shared password for one league. You already entered it at sign-in.</div>
+            <div className="obcode">{workspace || "—"}</div>
+            <div className="note">If a co-manager will share this team, both of you must enter the <b>same</b> code. Solo? You can ignore this.</div>
           </>
         )}
 
         {step === 2 && (
           <>
-            <div className="obstepnum">Point it at your league</div>
-            <h2>Which email matters?</h2>
-            <div className="lead">This focuses every scan so your league's news surfaces first.</div>
+            <h2 id="ob-title">Connect your league</h2>
+            <div className="lead">Import live rosters so Coach knows your team.</div>
             <div className="obf">
-              <label>Platform emails</label>
-              <input value={src.senders} onChange={(e) => sf({ senders: e.target.value })} placeholder="noreply@sleeper.app" />
-              <div className="hint">The address your league site emails you from.</div>
+              <label>Platform</label>
+              <select value={platform} onChange={(e) => { setPlatform(e.target.value); set({ platform: e.target.value }); }}>
+                {["Sleeper", "Yahoo", "ESPN", "NFL"].map((p) => <option key={p} value={p}>{p}</option>)}
+              </select>
             </div>
             <div className="obf">
-              <label>Leaguemates &amp; commissioner</label>
-              <input value={src.people} onChange={(e) => sf({ people: e.target.value })} placeholder="commish@email.com, a trash-talking buddy…" />
-              <div className="hint">Names or addresses whose messages should always be flagged.</div>
+              <label>League ID</label>
+              <input
+                value={leagueId}
+                onChange={(e) => setLeagueId(e.target.value)}
+                placeholder={isSleeper ? "e.g. 112233445566" : platform + " league ID"}
+              />
+              <div className="hint">Find it in your league's web address: sleeper.com/leagues/THIS-NUMBER/… (grab it from a browser — easier than the app).</div>
             </div>
-            <div className="obf">
-              <label>Keywords to flag</label>
-              <input value={src.keywords} onChange={(e) => sf({ keywords: e.target.value })} />
-            </div>
-            <div className="obf">
-              <label>Gmail labels (optional)</label>
-              <input value={src.labels} onChange={(e) => sf({ labels: e.target.value })} placeholder="Fantasy, League" />
-            </div>
+            <button className="btn" onClick={doImport} disabled={busy}>{busy && <span className="spin" />}{busy ? "Importing…" : "Import"}</button>
+            {!isSleeper && (
+              <div className="note">Yahoo, ESPN, and NFL need the connector or manual entry. Sleeper is the one-tap automated option.</div>
+            )}
+            {msg && <div className="note" style={importOk ? { borderColor: "var(--go)" } : { borderColor: "var(--now)" }}>{msg}</div>}
           </>
         )}
 
         {step === 3 && (
           <>
-            <div className="obstepnum">Confirm your league</div>
-            <h2>Last thing</h2>
-            <div className="obf"><label>League name</label><input value={lg.league} onChange={(e) => lf({ league: e.target.value })} /></div>
-            <div className="obf"><label>Teams</label>
-              <select value={lg.teams} onChange={(e) => lf({ teams: Number(e.target.value) })}>{[8, 10, 12, 14].map((n) => <option key={n} value={n}>{n}</option>)}</select>
+            <h2 id="ob-title">Pick your team</h2>
+            {importOk && msg && <div className="note" style={{ borderColor: "var(--go)" }}>{msg}</div>}
+            <div className="note">This is the step everyone forgets — the Coach needs to know which team is yours.</div>
+            {hasTeams ? (
+              <div style={{ marginTop: 12 }}>
+                {(members || []).map((m, i) => (
+                  <button type="button" key={i} className={"obteam" + (m.mine ? " on" : "")} onClick={() => setMine(i)}>
+                    <span>
+                      <div className="tn">{m.teamName || m.name || ("Team " + (i + 1))}</div>
+                      <div className="sub">{m.name}{m.roster && m.roster.length ? " · " + m.roster.length + " players" : ""}</div>
+                    </span>
+                    <span className="mark">{m.mine ? "★ My team" : "My team"}</span>
+                  </button>
+                ))}
+              </div>
+            ) : (
+              <div className="empty">No teams imported. You can set yours later in the League tab.</div>
+            )}
+          </>
+        )}
+
+        {step === 4 && (
+          <>
+            <h2 id="ob-title">Confirm settings</h2>
+            <div className="lead">Import usually gets these right. Change anything that's off.</div>
+            <div className="obf">
+              <label>Scoring</label>
+              <select value={cfg.scoring} onChange={(e) => set({ scoring: e.target.value })}>
+                {[...new Set(["PPR", "Half-PPR", "Standard", cfg.scoring].filter(Boolean))].map((s) => <option key={s} value={s}>{s}</option>)}
+              </select>
             </div>
-            <div className="obf"><label>Scoring</label>
-              <select value={lg.scoring} onChange={(e) => lf({ scoring: e.target.value })}>{["PPR", "Half-PPR", "Standard"].map((s) => <option key={s} value={s}>{s}</option>)}</select>
+            <div className="obf">
+              <label>Teams</label>
+              <select value={cfg.teams} onChange={(e) => set({ teams: Number(e.target.value) })}>
+                {teamCountOpts.map((n) => <option key={n} value={n}>{n}</option>)}
+              </select>
             </div>
-            <div className="obf"><label>Format</label>
-              <select value={lg.format} onChange={(e) => lf({ format: e.target.value })}>{["Standard (1 QB)", "Superflex / 2-QB"].map((s) => <option key={s} value={s}>{s}</option>)}</select>
+            <div className="obf">
+              <label>Roster format</label>
+              <select value={cfg.format} onChange={(e) => set({ format: e.target.value })}>
+                {["Standard (1 QB)", "Superflex / 2-QB"].map((s) => <option key={s} value={s}>{s}</option>)}
+              </select>
             </div>
+          </>
+        )}
+
+        {step === 5 && (
+          <>
+            <h2 id="ob-title">You're set</h2>
+            <div className="lead">From now on, just open the app — the Coach tells you what to do.</div>
           </>
         )}
 
         <div className="obnav">
           {step > 0 ? <button className="btn ghost" onClick={back}>Back</button> : <span />}
           {step < total - 1
-            ? <button className="btn" onClick={next}>Next</button>
-            : <button className="btn" onClick={finish}>Finish setup</button>}
+            ? <button className="btn" onClick={next} disabled={!canNext}>Next</button>
+            : <button className="btn" onClick={finish}>Go to Coach</button>}
         </div>
       </div>
     </div>
@@ -1765,31 +1868,14 @@ function League({ cfg, setCfg, members, setMembers }) {
   const doImport = async () => {
     setBusy(true); setMsg("");
     try {
-      if (isSleeper) {
-        const result = await importSleeper(id);
-        setMembers(result.members);
-        setCfg({
-          ...cfg,
-          platform,
-          leagueId: id,
-          league: result.league.name || cfg.league,
-          teams: result.league.teams || cfg.teams,
-          scoring: result.league.scoring || cfg.scoring,
-        });
-        const withRosters = result.members.filter((x) => x.roster && x.roster.length).length;
-        setMsg("Imported " + result.members.length + " managers" + (withRosters ? " with live rosters" : "") + ". Mark your team below so Matchup, Trades, and Moves use your real roster.");
-      } else {
-        const m = await importViaApi(platform.toLowerCase(), id);
-        setMembers(m);
-        setCfg({ ...cfg, platform, leagueId: id });
-        const withRosters = m.filter((x) => x.roster && x.roster.length).length;
-        setMsg("Imported " + m.length + " managers" + (withRosters ? " with live rosters" : "") + ". Mark your team below so Trades and Moves use your real roster.");
-      }
+      const result = await runLeagueImport(platform, id, cfg);
+      setMembers(result.members);
+      setCfg(result.cfg);
+      const withRosters = result.members.filter((x) => x.roster && x.roster.length).length;
+      setMsg("Imported " + result.members.length + " managers" + (withRosters ? " with live rosters" : "") + ". Mark your team below so Matchup, Trades, and Moves use your real roster.");
     } catch (e) {
       setCfg({ ...cfg, platform, leagueId: id });
-      setMsg(isSleeper
-        ? ("Couldn't import from Sleeper. Check the league ID and try again." + (e && e.message ? " (" + e.message + ")" : ""))
-        : (e && e.message ? e.message : "Couldn't import this league. For Yahoo, connect your account first, then import."));
+      setMsg(leagueImportError(platform, e));
     }
     setBusy(false);
   };
