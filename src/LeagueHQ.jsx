@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef, useCallback } from "react";
 import storage from "./storage";
 import { getWorkspaceId } from "./firebase";
 import { apiFetch, apiJson, errText, errFromApiBody } from "./api";
-import { importSleeperLeague, sleeperNextOpponentDirect, nflSeasonClock } from "./sleeper";
+import { importSleeperLeague, sleeperNextOpponentDirect, nflSeasonClock, getNflPlayers } from "./sleeper";
 import { connectGmail, fetchGmailMessages, hasGmailToken, messagesToDump, parsePastedMail, triageLocal } from "./gmail";
 
 /* =========================================================================
@@ -1641,11 +1641,115 @@ function Reminders({ rem, setRem, deadlines, cfg, alertsOn, notifPerm, enableAle
 }
 
 /* ---------- Moves (start/sit + waivers) ---------- */
+const FANTASY_POS = new Set(["QB", "RB", "WR", "TE", "K", "DEF"]);
+function sleeperPlayerName(p, id) {
+  return (p && (p.full_name || `${p.first_name || ""} ${p.last_name || ""}`.trim())) || String(id || "");
+}
+function sleeperIsActive(p) {
+  if (!p) return false;
+  if (p.active === false) return false;
+  const st = String(p.status || "").toLowerCase();
+  if (st === "inactive" || st === "retired" || st === "na") return false;
+  return true;
+}
+function rosteredPlayerIds(members, pool) {
+  const ids = new Set();
+  const byName = new Map();
+  Object.entries(pool || {}).forEach(([id, p]) => {
+    const nm = sleeperPlayerName(p, id).toLowerCase();
+    if (nm) byName.set(nm, id);
+    if (p && (p.position === "DEF" || p.position === "DST") && p.team) byName.set(String(p.team).toLowerCase(), id);
+  });
+  (members || []).forEach((m) => {
+    (m.roster || []).forEach((r) => {
+      if (r.player_id) ids.add(String(r.player_id));
+      const raw = String(r.name || "").trim();
+      const key = raw.toLowerCase().replace(/\s+def$/, "");
+      if (key && byName.has(key)) ids.add(byName.get(key));
+      if (raw && byName.has(raw.toLowerCase())) ids.add(byName.get(raw.toLowerCase()));
+      if ((r.pos === "DEF" || r.pos === "DST") && r.team) ids.add(String(r.team));
+    });
+  });
+  return ids;
+}
+
+function WaiversList({ cfg, members }) {
+  const [pool, setPool] = useState(null);
+  const [posf, setPosf] = useState("ALL");
+  const [q, setQ] = useState("");
+  const hasRosters = (members || []).some((m) => m.roster && m.roster.length);
+
+  useEffect(() => {
+    if (!hasRosters) return;
+    let cancelled = false;
+    getNflPlayers().then((data) => { if (!cancelled) setPool(data || {}); });
+    return () => { cancelled = true; };
+  }, [hasRosters]);
+
+  if (!hasRosters) {
+    return <div className="empty" style={{ paddingTop: 0 }}>Import your league first in the League tab.</div>;
+  }
+  if (pool == null) {
+    return (
+      <div className="empty" style={{ paddingTop: 0, display: "flex", alignItems: "center" }}>
+        <span className="spin" /> Loading players…
+      </div>
+    );
+  }
+
+  const taken = rosteredPlayerIds(members, pool);
+  const qn = q.trim().toLowerCase();
+  const rows = Object.entries(pool).reduce((acc, [id, p]) => {
+    if (!p || taken.has(id)) return acc;
+    const pos = p.position === "DST" ? "DEF" : (p.position || "");
+    if (!FANTASY_POS.has(pos) || !sleeperIsActive(p)) return acc;
+    const name = sleeperPlayerName(p, id);
+    if (qn && !name.toLowerCase().includes(qn)) return acc;
+    if (posf !== "ALL" && pos !== posf) return acc;
+    const rank = Number(p.search_rank);
+    acc.push({
+      id,
+      name,
+      pos,
+      team: p.team || "",
+      rank: Number.isFinite(rank) ? rank : Infinity,
+    });
+    return acc;
+  }, []);
+  rows.sort((a, b) => a.rank - b.rank || a.name.localeCompare(b.name));
+  const shown = rows.slice(0, 150);
+
+  return (
+    <div>
+      <div className="empty" style={{ paddingTop: 0 }}>
+        Free agents in {cfg.league} — as of your last import.
+      </div>
+      <div className="tools">
+        <input placeholder="Search player…" value={q} onChange={(e) => setQ(e.target.value)} />
+      </div>
+      <div className="tools posfilter">
+        {["ALL", "QB", "RB", "WR", "TE", "K", "DEF"].map((p) => (
+          <button key={p} className={posf === p ? "on" : ""} onClick={() => setPosf(p)}>{p}</button>
+        ))}
+      </div>
+      <div className="plist">
+        {shown.length === 0 ? (
+          <div className="empty">No available players match that filter.</div>
+        ) : shown.map((p) => (
+          <div className="prow" key={p.id}>
+            <span className={"posbadge pb-" + (p.pos === "K" ? "PK" : p.pos)}>{p.pos}</span>
+            <span className="pname">{p.name}{p.team ? <><br /><span className="sub">{p.team}</span></> : null}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function Moves({ cfg, board, members, pane = "start" }) {
   const tabm = pane;
   const [qStart, setQStart] = useState("");
   const [outStart, setOutStart] = useState("");
-  const [outWaiver, setOutWaiver] = useState("");
   const [busy, setBusy] = useState("");
 
   const active = activeRoster(members, board);
@@ -1663,13 +1767,6 @@ function Moves({ cfg, board, members, pane = "start" }) {
     catch (e) { setOutStart(advisorError(e)); }
     setBusy("");
   };
-  const waivers = async () => {
-    setBusy("waiver"); setOutWaiver("");
-    const sys = "You are a fantasy football waiver-wire advisor for a 12-team PPR league. Suggest 3-5 realistic waiver/pickup targets for this week, each with a one-line reason (role change, injury opening, target share), and note a plausible drop. Keep it tight.";
-    try { setOutWaiver(await callClaude([{ role: "user", content: `My roster: ${roster}. Format: ${cfg.format}. Suggest waiver targets and who I could drop.` }], { system: sys })); }
-    catch (e) { setOutWaiver(advisorError(e)); }
-    setBusy("");
-  };
 
   return (
     <div className="card">
@@ -1685,15 +1782,7 @@ function Moves({ cfg, board, members, pane = "start" }) {
           {outStart && <div className="out">{outStart}</div>}
         </div>
       )}
-      {tabm === "waiver" && (
-        <div className="advisor">
-          <div className="empty" style={{ paddingTop: 0 }}>Suggests pickups based on your roster and this week's openings.</div>
-          <div style={{ marginTop: 10 }}>
-            <DoMe onClick={waivers} busy={busy === "waiver"} working="Scanning…" />
-          </div>
-          {outWaiver && <div className="out">{outWaiver}</div>}
-        </div>
-      )}
+      {tabm === "waiver" && <WaiversList cfg={cfg} members={members} />}
       {tabm === "byes" && (
         <div>
           {byeWeeks.length === 0 ? (
@@ -1716,7 +1805,9 @@ function Moves({ cfg, board, members, pane = "start" }) {
           <div className="note">Weeks with 3+ starters on bye are flagged red — plan a waiver or trade so you're not scrambling that week.</div>
         </div>
       )}
-      <div className="note">Uses your live roster from League → Teams (mark My team). Advice is AI-generated — sanity-check live injury news before you lock it in.</div>
+      {tabm !== "waiver" && (
+        <div className="note">Uses your live roster from League → Teams (mark My team). Advice is AI-generated — sanity-check live injury news before you lock it in.</div>
+      )}
     </div>
   );
 }

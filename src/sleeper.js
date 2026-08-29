@@ -12,7 +12,7 @@ async function sleeperJson(path) {
 let playersCache = null;
 let playersPromise = null;
 
-async function getNflPlayers() {
+export async function getNflPlayers() {
   if (playersCache) return playersCache;
   if (!playersPromise) {
     playersPromise = fetch(SLEEPER + "/players/nfl")
@@ -33,10 +33,10 @@ function resolvePlayer(pid, players) {
   const p = players[pid];
   if (p) {
     const name = p.full_name || `${p.first_name || ""} ${p.last_name || ""}`.trim() || pid;
-    return { name, pos: p.position || "", team: p.team || "" };
+    return { name, pos: p.position || "", team: p.team || "", player_id: pid };
   }
-  if (/^[A-Z]{2,3}$/.test(String(pid))) return { name: `${pid} DEF`, pos: "DEF", team: pid };
-  return { name: String(pid), pos: "", team: "" };
+  if (/^[A-Z]{2,3}$/.test(String(pid))) return { name: `${pid} DEF`, pos: "DEF", team: pid, player_id: pid };
+  return { name: String(pid), pos: "", team: "", player_id: pid };
 }
 
 function scoringLabel(league) {
