@@ -44,6 +44,7 @@ const CSS = `
   color:#062012;font-weight:900;font-size:13px}
 .leaguechip{font-size:12px;color:var(--muted);border:1px solid var(--line);border-radius:999px;padding:5px 11px}
 .leaguechip b{color:var(--ink);font-weight:700}
+.refreshline{font-size:11px;color:var(--muted2);font-weight:600;letter-spacing:.02em;white-space:nowrap}
 .spacer{flex:1}
 .me{font-size:12px;color:var(--muted);display:flex;align-items:center;gap:6px}
 .me select{background:var(--panel);color:var(--ink);border:1px solid var(--line);border-radius:8px;padding:5px 8px;font-size:12px}
@@ -531,6 +532,41 @@ async function callClaudeSearch(messages, extra = {}) {
 async function importSleeper(leagueId) {
   return importSleeperLeague(leagueId);
 }
+function findSavedMember(existing, fresh) {
+  const prev = existing || [];
+  if (fresh.rosterId != null) {
+    const hit = prev.find((p) => p.rosterId === fresh.rosterId);
+    if (hit) return hit;
+  }
+  if (fresh.ownerId) {
+    const hit = prev.find((p) => p.ownerId && p.ownerId === fresh.ownerId);
+    if (hit) return hit;
+  }
+  const tn = String(fresh.teamName || "").trim().toLowerCase();
+  if (tn) return prev.find((p) => String(p.teamName || "").trim().toLowerCase() === tn) || null;
+  return null;
+}
+function mergeImportedMembers(existing, fresh) {
+  return (fresh || []).map((m) => {
+    const old = findSavedMember(existing, m);
+    return {
+      ...m,
+      roster: Array.isArray(m.roster) ? m.roster : [],
+      mine: old ? !!old.mine : !!m.mine,
+      notes: old && old.notes != null ? old.notes : (m.notes || ""),
+    };
+  });
+}
+function fmtRefreshAgo(ts) {
+  if (!ts) return "";
+  const sec = Math.max(0, Math.floor((Date.now() - Number(ts)) / 1000));
+  if (sec < 45) return "Updated just now";
+  const min = Math.floor(sec / 60);
+  if (min < 60) return "Updated " + min + "m ago";
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return "Updated " + hr + "h ago";
+  return "Updated " + Math.floor(hr / 24) + "d ago";
+}
 async function sleeperNextOpponent(leagueId, myRosterId) {
   try {
     return await sleeperNextOpponentDirect(leagueId, myRosterId);
@@ -704,25 +740,47 @@ export default function LeagueHQ({ user, onSignOut }) {
   const [savedLineup, setSavedLineup] = useState(null);
   const [savedRoster, setSavedRoster] = useState(null);
   const [clock, setClock] = useState(null);
+  const [lastRefresh, setLastRefresh] = useState(null);
+  const [refreshing, setRefreshing] = useState(false);
 
   /* load shared state — only after Google sign-in + workspace code are set */
   useEffect(() => {
     if (!getWorkspaceId()) return;
     let cancelled = false;
     (async () => {
-      setCfg(await loadKey("league:config", cfg));
+      const nextCfg = await loadKey("league:config", cfg);
+      const nextMembers = await loadKey("league:members", []);
+      setCfg(nextCfg);
       setBoard(await loadKey("draft:board", {}));
       setRem(await loadKey("reminders:config", rem));
       setAlerts(await loadKey("alerts:latest", []));
       setSources(await loadKey("league:sources", sources));
-      setMembers(await loadKey("league:members", []));
+      setMembers(nextMembers);
       setOffers(await loadKey("trade:offers", []));
       setSlots(await loadKey("lineup:slots", defaultSlots(cfg.format)));
       setSavedLineup(await loadKey("lineup:final", null));
       setSavedRoster(await loadKey("roster:target", null));
       setOnboarded(await loadKey("me:onboarded", false, false));
+      setLastRefresh(await loadKey("league:lastRefresh", null));
       await loadAnthropicWorkspaceId();
       if (!cancelled) setReady(true);
+
+      const platform = nextCfg.platform || "Sleeper";
+      if (platform === "Sleeper" && nextCfg.leagueId) {
+        if (!cancelled) setRefreshing(true);
+        try {
+          const result = await importSleeper(nextCfg.leagueId);
+          if (!cancelled && result && Array.isArray(result.members)) {
+            const merged = mergeImportedMembers(nextMembers, result.members);
+            setMembers(merged);
+            saveKey("league:members", merged);
+            const ts = Date.now();
+            setLastRefresh(ts);
+            saveKey("league:lastRefresh", ts, true);
+          }
+        } catch { /* keep last-known members */ }
+        if (!cancelled) setRefreshing(false);
+      }
     })();
     return () => { cancelled = true; };
     // eslint-disable-next-line
@@ -825,6 +883,9 @@ export default function LeagueHQ({ user, onSignOut }) {
           >
             <b>{cfg.league}</b> · {cfg.platform || "Sleeper"} · {cfg.teams}-team {cfg.scoring}
           </span>
+          {(refreshing || lastRefresh) && (
+            <span className="refreshline">{refreshing ? "Refreshing…" : fmtRefreshAgo(lastRefresh)}</span>
+          )}
           <span className="spacer" />
           <span className="me">
             You are
