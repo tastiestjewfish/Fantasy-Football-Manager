@@ -401,15 +401,25 @@ function downloadICS(title, start, opts = {}) {
 }
 
 /* ---------- Anthropic API (proxied through same-origin /api/ai) ---------- */
+let anthropicWorkspaceId = "";
 function getAnthropicWorkspaceId() {
-  try { return (localStorage.getItem("leaguehq:anthropicWorkspaceId") || "").trim(); } catch { return ""; }
+  return anthropicWorkspaceId;
 }
 function setAnthropicWorkspaceId(id) {
+  const v = String(id || "").trim();
+  anthropicWorkspaceId = v;
+  if (v) storage.set("anthropic:workspaceId", v, false);
+  else storage.delete("anthropic:workspaceId", false);
+}
+async function loadAnthropicWorkspaceId() {
   try {
-    const v = String(id || "").trim();
-    if (v) localStorage.setItem("leaguehq:anthropicWorkspaceId", v);
-    else localStorage.removeItem("leaguehq:anthropicWorkspaceId");
+    const rec = await storage.get("anthropic:workspaceId", false);
+    if (rec && rec.value) {
+      anthropicWorkspaceId = String(rec.value).trim();
+      return anthropicWorkspaceId;
+    }
   } catch {}
+  return anthropicWorkspaceId;
 }
 async function callClaude(messages, extra = {}) {
   const workspaceId = getAnthropicWorkspaceId();
@@ -711,6 +721,7 @@ export default function LeagueHQ({ user, onSignOut }) {
       setSavedLineup(await loadKey("lineup:final", null));
       setSavedRoster(await loadKey("roster:target", null));
       setOnboarded(await loadKey("me:onboarded", false, false));
+      await loadAnthropicWorkspaceId();
       if (!cancelled) setReady(true);
     })();
     return () => { cancelled = true; };
