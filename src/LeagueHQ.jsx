@@ -100,6 +100,12 @@ const CSS = `
 .alert .s{font-size:13px;color:var(--muted);margin-top:2px}
 .alert .meta{font-size:11px;color:var(--muted2);margin-top:5px;display:flex;gap:10px;flex-wrap:wrap;text-transform:uppercase;letter-spacing:.05em;font-weight:700}
 .empty{color:var(--muted);font-size:13px;padding:8px 0;line-height:1.5}
+.coachrow{display:flex;justify-content:space-between;align-items:flex-start;gap:12px}
+.coachrow .v{font-weight:800;font-size:15px;line-height:1.35;flex:1;min-width:0}
+.coachwhybtn{background:transparent;border:0;color:var(--muted);font-weight:700;font-size:12px;
+  letter-spacing:.06em;text-transform:uppercase;padding:8px 0 0;display:inline-flex;align-items:center;gap:6px}
+.coachwhybtn:hover{color:var(--ink)}
+.coachwhy{margin-top:8px;font-size:13px;color:var(--muted);line-height:1.55}
 
 /* buttons */
 .btn{background:var(--brand);color:#062012;border:0;border-radius:10px;font-weight:800;font-size:13px;padding:10px 15px;
@@ -526,6 +532,30 @@ function activeRoster(members, board) {
   if (me) return me.roster.map((p) => ({ name: p.name, pos: p.pos, team: p.team, bye: TEAM_BYE[p.team], playerKey: p.playerKey }));
   return PLAYERS.filter((p) => board[p.id] === "mine").map((p) => ({ name: p.name, pos: p.pos, team: p.team, bye: p.bye }));
 }
+async function resolveNextOpponent(cfg, members) {
+  const list = members || [];
+  const meMember = list.find((m) => m.mine);
+  if ((cfg.platform || "Sleeper") === "Sleeper" && cfg.leagueId && meMember && meMember.rosterId != null) {
+    try {
+      const r = await sleeperNextOpponent(cfg.leagueId, meMember.rosterId);
+      if (r && r.oppRosterId != null) {
+        const om = list.find((m) => m.rosterId === r.oppRosterId);
+        if (om) return om;
+      }
+    } catch { /* fall through to a marked opponent */ }
+  }
+  const flagged = list.find((m) => !m.mine && m.opponent);
+  if (flagged) return flagged;
+  try {
+    const key = await loadKey("matchup:oppKey", "", false);
+    if (key) {
+      const others = list.filter((m) => !m.mine);
+      const found = others.find((m, i) => (m.rosterId != null ? "r" + m.rosterId : "i" + i) === key);
+      if (found) return found;
+    }
+  } catch { /* no marked opponent */ }
+  return null;
+}
 function rosterNeeds(roster) {
   const c = (pos) => roster.filter((p) => p.pos === pos).length;
   const need = [];
@@ -597,7 +627,7 @@ function localRoster(cfg, fullSlots) {
 
 /* ========================================================================= */
 export default function LeagueHQ({ user, onSignOut }) {
-  const [tab, setTab] = useState("home");
+  const [tab, setTab] = useState("coach");
   const [panes, setPanes] = useState({ week: "lineup", moves: "trades", league: "teams", draft: "board" });
   const [ready, setReady] = useState(false);
   const [me, setMe] = useState("A");
@@ -711,6 +741,7 @@ export default function LeagueHQ({ user, onSignOut }) {
   const heroState = nextDeadline ? urgencyFor(nextDeadline.when) : "go";
 
   const TABS = [
+    { id: "coach", label: "Coach" },
     { id: "home", label: "Home" },
     { id: "week", label: "This week", panes: [["lineup", "Lineup"], ["matchup", "Matchup"], ["start", "Start / Sit"]] },
     { id: "moves", label: "Moves", panes: [["trades", "Trades"], ["waiver", "Waivers"], ["byes", "Byes"]] },
@@ -774,7 +805,7 @@ export default function LeagueHQ({ user, onSignOut }) {
       </header>
 
       <main className="wrap">
-        {(tab === "home" || tab === "week") && clock && (
+        {(tab === "coach" || tab === "home" || tab === "week") && clock && (
           <div className="weekbanner">{clock.label}</div>
         )}
         {activeTab && activeTab.panes && (
@@ -783,6 +814,9 @@ export default function LeagueHQ({ user, onSignOut }) {
               <button key={id} className={pane === id ? "on" : ""} onClick={() => setPane(id)}>{label}</button>
             ))}
           </div>
+        )}
+        {tab === "coach" && (
+          <Coach cfg={cfg} board={board} members={members} slots={slots} go={go} nextDeadline={nextDeadline} />
         )}
         {tab === "home" && (
           <Dashboard
@@ -968,6 +1002,118 @@ function Toast({ toast, onClose }) {
         <div className="tb">{toast.body}</div>
       </div>
       <button className="tx" onClick={onClose} aria-label="Dismiss">×</button>
+    </div>
+  );
+}
+
+/* ---------- Coach (weekly action list) ---------- */
+const COACH_SYS = (teams, scoring, format) =>
+  "You are the user's fantasy football head coach for a " + teams + "-team " + scoring + " league (" + format + "). It is head-to-head. Use web_search for THIS WEEK's projections, injuries, inactives, and news. Using my roster, my next opponent's roster, and the league, tell me EXACTLY what to do this week to win — a SHORT prioritized action list, most important first. Only include actions that need doing now; if my team is already optimal, say so. For lineup advice, be opponent-aware (protect the floor if I'm favored, chase ceiling if I'm the underdog). For trades, name the specific manager to target and the exact offer. Respond with ONLY JSON, no prose: {\"deadline\":\"e.g. Lineup locks Sun 1:00pm ET\",\"allSet\":false,\"actions\":[{\"type\":\"lineup|trade|waiver|drop|none\",\"priority\":1,\"verdict\":\"one imperative line, e.g. Start Puka over Waddle\",\"why\":\"2-3 sentences of reasoning\",\"copy\":\"optional text to copy, e.g. a trade message to send\"}]}";
+
+function Coach({ cfg, board, members, slots, go, nextDeadline }) {
+  const [busy, setBusy] = useState(true);
+  const [err, setErr] = useState("");
+  const [data, setData] = useState(null);
+  const [openWhy, setOpenWhy] = useState({});
+  const [copied, setCopied] = useState(null);
+
+  const run = async () => {
+    setBusy(true); setErr(""); setData(null); setOpenWhy({}); setCopied(null);
+    const roster = activeRoster(members, board);
+    const opp = await resolveNextOpponent(cfg, members);
+    const leagueLines = (members || []).map((m) => {
+      const label = (m.teamName || m.name || "Team") + (m.mine ? " [me]" : "");
+      const ros = (m.roster || []).map((p) => p.name + " (" + p.pos + ")").join(", ") || "empty";
+      return label + ": " + ros;
+    }).join("\n");
+    const user = [
+      "My roster: " + (roster.map((p) => p.name + " (" + p.pos + ")").join(", ") || "not set") + ".",
+      "Opponent: " + (opp ? (opp.teamName || opp.name) : "unknown") + ". Opponent roster: " +
+        (opp && opp.roster && opp.roster.length ? opp.roster.map((p) => p.name + " (" + p.pos + ")").join(", ") : "unknown") + ".",
+      "My slots: " + (slots || []).join(", ") + ".",
+      "Scoring: " + cfg.scoring + ".",
+      leagueLines ? "League members:\n" + leagueLines : "",
+    ].filter(Boolean).join("\n");
+    try {
+      const j = extractJSON(await callClaudeSearch([{ role: "user", content: user }], { system: COACH_SYS(cfg.teams, cfg.scoring, cfg.format) }));
+      const actions = (Array.isArray(j.actions) ? j.actions : []).slice().sort((a, b) => (a.priority || 99) - (b.priority || 99));
+      setData({ deadline: j.deadline || (nextDeadline ? nextDeadline.label : ""), allSet: !!j.allSet, actions });
+    } catch (e) {
+      setErr(advisorError(e));
+    }
+    setBusy(false);
+  };
+
+  useEffect(() => { run(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, []);
+
+  const deadlineLine = data && data.deadline ? (
+    <div className="eyebrow" style={{ margin: "16px 0 12px" }}>Next deadline: {data.deadline}</div>
+  ) : null;
+
+  const actionBtn = (a, i) => {
+    const type = String(a.type || "").toLowerCase();
+    const hasCopy = !!(a.copy && String(a.copy).trim());
+    if (type === "none") return null;
+    if (type === "trade" || hasCopy) {
+      return (
+        <button className="btn sm" onClick={() => { copyText(a.copy); setCopied(i); }}>
+          {copied === i ? "Copied" : "Copy"}
+        </button>
+      );
+    }
+    if (type === "lineup") return <button className="btn sm" onClick={() => go("week", "lineup")}>Set lineup</button>;
+    if (type === "waiver" || type === "drop") return <button className="btn sm" onClick={() => go("moves", "waiver")}>Open Moves</button>;
+    return null;
+  };
+
+  return (
+    <div>
+      {busy && (
+        <div className="card" style={{ marginTop: 16 }}>
+          <div className="empty" style={{ padding: 8, display: "flex", alignItems: "center" }}>
+            <span className="spin" /> Checking your team…
+          </div>
+        </div>
+      )}
+      {err && (
+        <div className="card" style={{ marginTop: 16 }}>
+          <div className="note" style={{ borderColor: "var(--now)", marginTop: 0 }}>{err}</div>
+          <button className="btn" style={{ marginTop: 12 }} onClick={run}>Retry</button>
+        </div>
+      )}
+      {data && (data.allSet || data.actions.length === 0) && (
+        <>
+          {deadlineLine}
+          <div className="card">
+            <div className="empty" style={{ color: "var(--go)", fontWeight: 700, padding: 4 }}>
+              You're set this week ✓ — nothing to change right now.
+            </div>
+          </div>
+        </>
+      )}
+      {data && !data.allSet && data.actions.length > 0 && (
+        <>
+          {deadlineLine}
+          <div className="grid" style={{ gap: 12 }}>
+            {data.actions.map((a, i) => (
+              <div className="card" key={i}>
+                <div className="coachrow">
+                  <div className="v">{a.verdict || "—"}</div>
+                  {actionBtn(a, i)}
+                </div>
+                {a.why && (
+                  <>
+                    <button type="button" className="coachwhybtn" onClick={() => setOpenWhy((s) => ({ ...s, [i]: !s[i] }))}>
+                      Why {openWhy[i] ? "▴" : "▾"}
+                    </button>
+                    {openWhy[i] && <div className="coachwhy">{a.why}</div>}
+                  </>
+                )}
+              </div>
+            ))}
+          </div>
+        </>
+      )}
     </div>
   );
 }
@@ -2074,6 +2220,11 @@ function Matchup({ cfg, slots, board, members, setSavedLineup }) {
   const [detMsg, setDetMsg] = useState("");
   const [used, setUsed] = useState(false);
 
+  useEffect(() => {
+    loadKey("matchup:oppKey", "", false).then((k) => { if (k) setOppKey(k); });
+  }, []);
+  const markOpp = (k) => { setOppKey(k); saveKey("matchup:oppKey", k, false); };
+
   const opp = opponents.find((m, i) => oppKeyOf(m, i) === oppKey);
 
   const detectOpponent = async () => {
@@ -2087,7 +2238,7 @@ function Matchup({ cfg, slots, board, members, setSavedLineup }) {
       if (r && r.oppRosterId != null) {
         const om = members.find((m) => m.rosterId === r.oppRosterId);
         if (om) {
-          setOppKey(om.rosterId != null ? "r" + om.rosterId : oppKeyOf(om, opponents.findIndex((x) => x === om)));
+          markOpp(om.rosterId != null ? "r" + om.rosterId : oppKeyOf(om, opponents.findIndex((x) => x === om)));
           setDetMsg(r.started
             ? (r.label + ": you're facing " + (om.teamName || om.name) + ".")
             : (r.label + ". Projected Week 1 opponent: " + (om.teamName || om.name) + "."));
@@ -2156,7 +2307,7 @@ function Matchup({ cfg, slots, board, members, setSavedLineup }) {
       <div className="card">
         <div className="cardhead"><h3>Matchup — beat your next opponent</h3></div>
         <div className="tools">
-          <select value={oppKey} onChange={(e) => setOppKey(e.target.value)} style={{ flex: 1 }}>
+          <select value={oppKey} onChange={(e) => markOpp(e.target.value)} style={{ flex: 1 }}>
             <option value="">Pick your opponent…</option>
             {opponents.map((m, i) => (
               <option key={oppKeyOf(m, i)} value={oppKeyOf(m, i)}>{m.teamName || m.name || ("Team " + (i + 1))}</option>
