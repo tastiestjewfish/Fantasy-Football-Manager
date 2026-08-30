@@ -61,7 +61,7 @@ export async function fetchGmailMessages(sources) {
   const headers = { Authorization: "Bearer " + token };
   const q = encodeURIComponent(gmailQuery(sources));
   const listRes = await fetch(
-    "https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=20&q=" + q,
+    "https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=12&q=" + q,
     { headers }
   );
   if (listRes.status === 401) {
@@ -79,7 +79,7 @@ export async function fetchGmailMessages(sources) {
   if (!listRes.ok) throw new Error("Gmail HTTP " + listRes.status);
 
   const list = await listRes.json();
-  const ids = (list.messages || []).map((m) => m.id).slice(0, 15);
+  const ids = (list.messages || []).map((m) => m.id).slice(0, 10);
   const messages = await Promise.all(ids.map(async (id) => {
     const r = await fetch(
       "https://gmail.googleapis.com/gmail/v1/users/me/messages/" + id +

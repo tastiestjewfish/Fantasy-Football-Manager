@@ -68,6 +68,13 @@ app.use((req, res, next) => {
 /* =========================================================================
    AI  — secret key stays on the server
    ========================================================================= */
+const AI_MODELS = new Set(["claude-haiku-4-5", "claude-sonnet-4-6"]);
+const CACHE_CTRL = { type: "ephemeral", ttl: "1h" };
+
+function withCacheControl(block) {
+  return { ...block, cache_control: CACHE_CTRL };
+}
+
 app.post("/api/ai", async (req, res) => {
   try {
     const key = process.env.ANTHROPIC_API_KEY;
@@ -76,12 +83,18 @@ app.post("/api/ai", async (req, res) => {
     if (!Array.isArray(body.messages) || !body.messages.length) {
       return res.status(400).json({ error: "messages required" });
     }
+    const model = AI_MODELS.has(body.model) ? body.model : "claude-haiku-4-5";
+    const maxTokens = Math.min(Math.max(Number(body.max_tokens) || 1200, 128), 2500);
     const payload = {
-      model: body.model || "claude-sonnet-4-6",
-      max_tokens: body.max_tokens || 2000,
+      model,
+      max_tokens: maxTokens,
       messages: body.messages,
     };
-    if (body.system) payload.system = body.system;
+    if (body.system) {
+      payload.system = typeof body.system === "string"
+        ? [withCacheControl({ type: "text", text: body.system })]
+        : body.system;
+    }
     if (body.tools) payload.tools = body.tools;
     if (body.tool_choice) payload.tool_choice = body.tool_choice;
     if (body.temperature != null) payload.temperature = body.temperature;
@@ -109,6 +122,9 @@ app.post("/api/ai", async (req, res) => {
       const raw = data && data.error;
       const msg = (raw && (raw.message || raw.type)) || data.message || ("Anthropic " + r.status);
       return res.status(r.status).json({ error: typeof msg === "string" ? msg : String(msg) });
+    }
+    if (data && data.usage) {
+      console.log("anthropic", payload.model, JSON.stringify(data.usage));
     }
     res.status(r.status).json(data);
   } catch (e) {
