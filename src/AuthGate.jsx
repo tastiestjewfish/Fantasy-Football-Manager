@@ -185,7 +185,7 @@ export default function AuthGate({ children }) {
     return (
       <Shell>
         <h1>Sign in</h1>
-        <p className="lead">Use your Google account to open League HQ. Co-managers each sign in, then enter the same workspace code to share one league.</p>
+        <p className="lead">Use your Google account to open League HQ. Co-managers each sign in, then enter the same workspace code to share leagues.</p>
         {error ? <p className="err">{error}</p> : null}
         <button type="button" className="gbtn" onClick={onGoogle} disabled={busy}>
           <GoogleIcon />
@@ -200,7 +200,7 @@ export default function AuthGate({ children }) {
     return (
       <Shell>
         <h1>Workspace code</h1>
-        <p className="lead">Co-managers type the <b>same code</b> so you share one draft board, reminders, and league. Pick something only you two know.</p>
+        <p className="lead">Co-managers type the <b>same code</b> so you share leagues, rosters, and reminders. Pick something only you two know.</p>
         <form onSubmit={onWorkspace}>
           {error ? <p className="err">{error}</p> : null}
           <div className="field">

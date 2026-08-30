@@ -42,8 +42,22 @@ const CSS = `
 .logo{font-weight:800;letter-spacing:-.02em;font-size:20px;display:flex;align-items:center;gap:9px}
 .logo .mk{width:22px;height:22px;border-radius:6px;background:var(--brand);display:inline-grid;place-items:center;
   color:#062012;font-weight:900;font-size:13px}
-.leaguechip{font-size:12px;color:var(--muted);border:1px solid var(--line);border-radius:999px;padding:5px 11px}
+.leaguechip{font-size:12px;color:var(--muted);border:1px solid var(--line);border-radius:999px;padding:5px 11px;
+  background:transparent}
 .leaguechip b{color:var(--ink);font-weight:700}
+.lgpick{position:relative}
+.lgpick > .leaguechip{display:inline-flex;align-items:center;gap:7px;max-width:min(420px,70vw);background:transparent}
+.lgcaret{color:var(--muted2);font-size:10px}
+.lgmenu{position:absolute;top:calc(100% + 8px);left:0;min-width:260px;max-width:360px;z-index:40;
+  background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:6px;
+  box-shadow:0 16px 40px rgba(0,0,0,.45)}
+.lgopt{display:flex;flex-direction:column;align-items:flex-start;gap:2px;width:100%;background:transparent;
+  border:0;color:var(--ink);border-radius:9px;padding:9px 11px;text-align:left}
+.lgopt:hover{background:var(--panel2)}
+.lgopt.on{background:var(--goDim)}
+.lgopt b{font-size:13px;font-weight:800}
+.lgopt span{font-size:11px;color:var(--muted);font-weight:600}
+.lgopt.add{color:var(--brand);font-weight:800;font-size:13px;flex-direction:row;align-items:center}
 .refreshline{font-size:11px;color:var(--muted2);font-weight:600;letter-spacing:.02em;white-space:nowrap}
 .spacer{flex:1}
 .me{font-size:12px;color:var(--muted);display:flex;align-items:center;gap:6px}
@@ -334,6 +348,102 @@ async function saveKey(key, value, shared = true) {
   try { await storage.set(key, JSON.stringify(value), shared); } catch {}
 }
 
+/* ---------- multi-league storage (legacy keys stay readable for the first league) ---------- */
+const DEFAULT_CFG = {
+  league: "Fantasy League #1", platform: "Sleeper", teams: 12, scoring: "PPR",
+  format: "Standard (1 QB)", slot: "", draftDate: "", leagueId: "", connectorUrl: "", showDraft: null,
+};
+const DEFAULT_REM = { lineupDay: 0, lineupTime: "11:00", waiverDay: 2, waiverTime: "22:00", tradeDeadline: "" };
+function defaultSources(platform) {
+  const senders = platform === "Yahoo" ? "noreply@fantasy.yahoo.com"
+    : platform === "ESPN" ? "fantasy@email.espn.com"
+    : "noreply@sleeper.app";
+  return { senders, people: "", keywords: "trade, waiver, injury, questionable, inactive, suspension, start, bench", labels: "" };
+}
+const LEGACY_KIND = {
+  config: "league:config", members: "league:members", board: "draft:board", rem: "reminders:config",
+  alerts: "alerts:latest", sources: "league:sources", offers: "trade:offers", slots: "lineup:slots",
+  lineup: "lineup:final", roster: "roster:target", lastRefresh: "league:lastRefresh", coach: "ai:coach",
+};
+const MISSING = { __missing: true };
+function lk(leagueId, kind) { return "l:" + leagueId + ":" + kind; }
+function newLeagueId() { return "lg_" + Date.now().toString(36); }
+function summaryFromCfg(cfg, id) {
+  return {
+    id,
+    name: (cfg && cfg.league) || "Untitled league",
+    platform: (cfg && cfg.platform) || "Sleeper",
+    leagueId: (cfg && cfg.leagueId) || "",
+    teams: (cfg && cfg.teams) || 12,
+    scoring: (cfg && cfg.scoring) || "PPR",
+  };
+}
+function emptyLeagueBundle(cfgPatch) {
+  const cfg = { ...DEFAULT_CFG, ...(cfgPatch || {}) };
+  return {
+    cfg,
+    members: [],
+    board: {},
+    rem: { ...DEFAULT_REM },
+    alerts: [],
+    sources: defaultSources(cfg.platform),
+    offers: [],
+    slots: defaultSlots(cfg.format),
+    savedLineup: null,
+    savedRoster: null,
+    lastRefresh: null,
+  };
+}
+async function readLeagueValue(leagueId, kind, fallback) {
+  const namespaced = await loadKey(lk(leagueId, kind), MISSING);
+  if (namespaced !== MISSING) return namespaced;
+  if (leagueId === "default") return loadKey(LEGACY_KIND[kind], fallback);
+  return fallback;
+}
+async function loadLeagueBundle(leagueId) {
+  const cfg = { ...DEFAULT_CFG, ...(await readLeagueValue(leagueId, "config", DEFAULT_CFG)) };
+  return {
+    cfg,
+    members: await readLeagueValue(leagueId, "members", []),
+    board: await readLeagueValue(leagueId, "board", {}),
+    rem: { ...DEFAULT_REM, ...(await readLeagueValue(leagueId, "rem", DEFAULT_REM)) },
+    alerts: await readLeagueValue(leagueId, "alerts", []),
+    sources: { ...defaultSources(cfg.platform), ...(await readLeagueValue(leagueId, "sources", defaultSources(cfg.platform))) },
+    offers: await readLeagueValue(leagueId, "offers", []),
+    slots: await readLeagueValue(leagueId, "slots", defaultSlots(cfg.format)),
+    savedLineup: await readLeagueValue(leagueId, "lineup", null),
+    savedRoster: await readLeagueValue(leagueId, "roster", null),
+    lastRefresh: await readLeagueValue(leagueId, "lastRefresh", null),
+  };
+}
+async function writeLeagueBundle(leagueId, bundle) {
+  await Promise.all([
+    saveKey(lk(leagueId, "config"), bundle.cfg),
+    saveKey(lk(leagueId, "members"), bundle.members),
+    saveKey(lk(leagueId, "board"), bundle.board),
+    saveKey(lk(leagueId, "rem"), bundle.rem),
+    saveKey(lk(leagueId, "alerts"), bundle.alerts),
+    saveKey(lk(leagueId, "sources"), bundle.sources),
+    saveKey(lk(leagueId, "offers"), bundle.offers),
+    saveKey(lk(leagueId, "slots"), bundle.slots),
+    saveKey(lk(leagueId, "lineup"), bundle.savedLineup),
+    saveKey(lk(leagueId, "roster"), bundle.savedRoster),
+    saveKey(lk(leagueId, "lastRefresh"), bundle.lastRefresh),
+  ]);
+}
+function draftToolsVisible(cfg, members, clock) {
+  if (cfg && cfg.showDraft === true) return true;
+  if (cfg && cfg.showDraft === false) return false;
+  if (cfg && cfg.draftDate) {
+    const d = new Date(cfg.draftDate);
+    if (!isNaN(+d) && Date.now() > d.getTime() + 6 * 3600000) return false;
+  }
+  const mine = (members || []).find((m) => m.mine && Array.isArray(m.roster) && m.roster.length >= 8);
+  if (mine && clock && (clock.started || clock.seasonType === "regular" || clock.seasonType === "post")) return false;
+  if (mine && mine.roster.length >= 12) return false;
+  return true;
+}
+
 /* ---------- time helpers ---------- */
 const DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 function nextWeekly(weekday, hhmm) {
@@ -454,14 +564,14 @@ function aiWeekKey(clock) {
 function rosterFingerprint(members, board) {
   return activeRoster(members, board).map((p) => p.name).sort().join("|");
 }
-async function loadAiAdvice(kind, key) {
-  const rec = await loadKey("ai:" + kind, null, true);
+async function loadAiAdvice(kind, key, storeKey) {
+  const rec = await loadKey(storeKey || ("ai:" + kind), null, true);
   if (!rec || rec.key !== key || rec.value == null) return null;
   if (Date.now() - (rec.at || 0) > AI_CACHE_TTL_MS) return null;
   return rec;
 }
-async function saveAiAdvice(kind, key, value) {
-  await saveKey("ai:" + kind, { key, at: Date.now(), value }, true);
+async function saveAiAdvice(kind, key, value, storeKey) {
+  await saveKey(storeKey || ("ai:" + kind), { key, at: Date.now(), value }, true);
 }
 
 async function callClaude(messages, extra = {}) {
@@ -760,23 +870,16 @@ export default function LeagueHQ({ user, onSignOut }) {
   const [ready, setReady] = useState(false);
   const [me, setMe] = useState("A");
 
-  const [cfg, setCfg] = useState({
-    league: "Fantasy League #1", platform: "Sleeper", teams: 12, scoring: "PPR",
-    format: "Standard (1 QB)", slot: "", draftDate: "", leagueId: "", connectorUrl: "",
-  });
+  const [cfg, setCfg] = useState(DEFAULT_CFG);
   const [board, setBoard] = useState({});            // {playerId: 'mine'|'gone'}
-  const [rem, setRem] = useState({
-    lineupDay: 0, lineupTime: "11:00",   // Sunday 11:00
-    waiverDay: 2, waiverTime: "22:00",   // Tuesday 22:00
-    tradeDeadline: "",
-  });
+  const [rem, setRem] = useState(DEFAULT_REM);
   const [alerts, setAlerts] = useState([]);          // from last inbox scan
   const [, force] = useState(0);
   const [toast, setToast] = useState(null);
   const [alertsOn, setAlertsOn] = useState(false);
   const [notifPerm, setNotifPerm] = useState(typeof Notification !== "undefined" ? Notification.permission : "unsupported");
   const firedRef = useRef({});
-  const [sources, setSources] = useState({ senders: "noreply@sleeper.app", people: "", keywords: "trade, waiver, injury, questionable, inactive, suspension, start, bench", labels: "" });
+  const [sources, setSources] = useState(defaultSources("Sleeper"));
   const [onboarded, setOnboarded] = useState(false);
   const [members, setMembers] = useState([]);
   const [offers, setOffers] = useState([]);
@@ -786,46 +889,68 @@ export default function LeagueHQ({ user, onSignOut }) {
   const [clock, setClock] = useState(null);
   const [lastRefresh, setLastRefresh] = useState(null);
   const [refreshing, setRefreshing] = useState(false);
+  const [leagues, setLeagues] = useState([]);
+  const [activeId, setActiveId] = useState("default");
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [addingLeague, setAddingLeague] = useState(false);
+  const activeIdRef = useRef("default");
+  const switchingRef = useRef(false);
+
+  const applyBundle = (bundle) => {
+    setCfg(bundle.cfg);
+    setMembers(bundle.members);
+    setBoard(bundle.board);
+    setRem(bundle.rem);
+    setAlerts(bundle.alerts);
+    setSources(bundle.sources);
+    setOffers(bundle.offers);
+    setSlots(bundle.slots);
+    setSavedLineup(bundle.savedLineup);
+    setSavedRoster(bundle.savedRoster);
+    setLastRefresh(bundle.lastRefresh);
+  };
+
+  const refreshSleeper = async (nextCfg, nextMembers, leagueId) => {
+    if ((nextCfg.platform || "Sleeper") !== "Sleeper" || !nextCfg.leagueId) return;
+    setRefreshing(true);
+    try {
+      const result = await importSleeper(nextCfg.leagueId);
+      if (result && Array.isArray(result.members) && activeIdRef.current === leagueId) {
+        const merged = mergeImportedMembers(nextMembers, result.members);
+        setMembers(merged);
+        saveKey(lk(leagueId, "members"), merged);
+        const ts = Date.now();
+        setLastRefresh(ts);
+        saveKey(lk(leagueId, "lastRefresh"), ts);
+      }
+    } catch { /* keep last-known members */ }
+    if (activeIdRef.current === leagueId) setRefreshing(false);
+  };
 
   /* load shared state — only after Google sign-in + workspace code are set */
   useEffect(() => {
     if (!getWorkspaceId()) return;
     let cancelled = false;
     (async () => {
-      const nextCfg = await loadKey("league:config", cfg);
-      const nextMembers = await loadKey("league:members", []);
-      setCfg(nextCfg);
-      setBoard(await loadKey("draft:board", {}));
-      setRem(await loadKey("reminders:config", rem));
-      setAlerts(await loadKey("alerts:latest", []));
-      setSources(await loadKey("league:sources", sources));
-      setMembers(nextMembers);
-      setOffers(await loadKey("trade:offers", []));
-      setSlots(await loadKey("lineup:slots", defaultSlots(cfg.format)));
-      setSavedLineup(await loadKey("lineup:final", null));
-      setSavedRoster(await loadKey("roster:target", null));
+      let index = await loadKey("leagues:index", null);
+      if (!Array.isArray(index) || !index.length) {
+        const legacyCfg = { ...DEFAULT_CFG, ...(await loadKey("league:config", DEFAULT_CFG)) };
+        index = [summaryFromCfg(legacyCfg, "default")];
+        await saveKey("leagues:index", index);
+      }
+      let nextId = await loadKey("me:activeLeagueId", index[0].id, false);
+      if (!index.some((l) => l.id === nextId)) nextId = index[0].id;
+      const bundle = await loadLeagueBundle(nextId);
+      if (cancelled) return;
+      activeIdRef.current = nextId;
+      setLeagues(index);
+      setActiveId(nextId);
+      applyBundle(bundle);
       setOnboarded(await loadKey("me:onboarded", false, false));
-      setLastRefresh(await loadKey("league:lastRefresh", null));
       await loadAnthropicWorkspaceId();
       await loadUseWebSearch();
       if (!cancelled) setReady(true);
-
-      const platform = nextCfg.platform || "Sleeper";
-      if (platform === "Sleeper" && nextCfg.leagueId) {
-        if (!cancelled) setRefreshing(true);
-        try {
-          const result = await importSleeper(nextCfg.leagueId);
-          if (!cancelled && result && Array.isArray(result.members)) {
-            const merged = mergeImportedMembers(nextMembers, result.members);
-            setMembers(merged);
-            saveKey("league:members", merged);
-            const ts = Date.now();
-            setLastRefresh(ts);
-            saveKey("league:lastRefresh", ts, true);
-          }
-        } catch { /* keep last-known members */ }
-        if (!cancelled) setRefreshing(false);
-      }
+      await refreshSleeper(bundle.cfg, bundle.members, nextId);
     })();
     return () => { cancelled = true; };
     // eslint-disable-next-line
@@ -841,18 +966,72 @@ export default function LeagueHQ({ user, onSignOut }) {
     nflSeasonClock().then(setClock).catch(() => {});
   }, []);
 
-  const persistCfg = (next) => { setCfg(next); saveKey("league:config", next); };
-  const persistBoard = (next) => { setBoard(next); saveKey("draft:board", next); };
-  const persistRem = (next) => { setRem(next); saveKey("reminders:config", next); };
-  const persistAlerts = (next) => { setAlerts(next); saveKey("alerts:latest", next); };
-  const persistSources = (next) => { setSources(next); saveKey("league:sources", next); };
-  const persistMembers = (next) => { setMembers(next); saveKey("league:members", next); };
-  const persistOffers = (next) => { setOffers(next); saveKey("trade:offers", next); };
-  const persistSlots = (next) => { setSlots(next); saveKey("lineup:slots", next); };
-  const persistSavedLineup = (next) => { setSavedLineup(next); saveKey("lineup:final", next); };
-  const persistSavedRoster = (next) => { setSavedRoster(next); saveKey("roster:target", next); };
+  const persistKind = (kind, setter) => (next) => {
+    setter(next);
+    if (switchingRef.current) return;
+    saveKey(lk(activeIdRef.current, kind), next);
+  };
+  const persistCfg = (next) => {
+    setCfg(next);
+    if (switchingRef.current) return;
+    const id = activeIdRef.current;
+    saveKey(lk(id, "config"), next);
+    setLeagues((prev) => {
+      const nextIndex = prev.map((l) => (l.id === id ? { ...l, ...summaryFromCfg(next, id) } : l));
+      saveKey("leagues:index", nextIndex);
+      return nextIndex;
+    });
+  };
+  const persistBoard = persistKind("board", setBoard);
+  const persistRem = persistKind("rem", setRem);
+  const persistAlerts = persistKind("alerts", setAlerts);
+  const persistSources = persistKind("sources", setSources);
+  const persistMembers = persistKind("members", setMembers);
+  const persistOffers = persistKind("offers", setOffers);
+  const persistSlots = persistKind("slots", setSlots);
+  const persistSavedLineup = persistKind("lineup", setSavedLineup);
+  const persistSavedRoster = persistKind("roster", setSavedRoster);
   const completeOnboarding = (srcNext) => { if (srcNext) persistSources(srcNext); setOnboarded(true); saveKey("me:onboarded", true, false); };
   const restartOnboarding = () => { setOnboarded(false); saveKey("me:onboarded", false, false); };
+
+  const switchLeague = async (id) => {
+    if (!id || id === activeIdRef.current) { setPickerOpen(false); return; }
+    switchingRef.current = true;
+    setPickerOpen(false);
+    setRefreshing(true);
+    const bundle = await loadLeagueBundle(id);
+    applyBundle(bundle);
+    activeIdRef.current = id;
+    setActiveId(id);
+    saveKey("me:activeLeagueId", id, false);
+    switchingRef.current = false;
+    setRefreshing(false);
+    if (tab === "draft" && !draftToolsVisible(bundle.cfg, bundle.members, clock)) setTab("coach");
+    await refreshSleeper(bundle.cfg, bundle.members, id);
+  };
+
+  const addLeague = async ({ cfg: nextCfg, members: nextMembers }) => {
+    const id = newLeagueId();
+    const bundle = { ...emptyLeagueBundle(nextCfg), cfg: { ...DEFAULT_CFG, ...nextCfg }, members: nextMembers || [] };
+    if (nextCfg && nextCfg.format) bundle.slots = defaultSlots(nextCfg.format);
+    await writeLeagueBundle(id, bundle);
+    const entry = summaryFromCfg(bundle.cfg, id);
+    const nextIndex = [...leagues, entry];
+    setLeagues(nextIndex);
+    saveKey("leagues:index", nextIndex);
+    setAddingLeague(false);
+    await switchLeague(id);
+    setTab("league");
+    setPanes((s) => ({ ...s, league: "teams" }));
+  };
+
+  const removeLeague = async (id) => {
+    if (leagues.length < 2) return;
+    const nextIndex = leagues.filter((l) => l.id !== id);
+    setLeagues(nextIndex);
+    saveKey("leagues:index", nextIndex);
+    if (id === activeIdRef.current) await switchLeague(nextIndex[0].id);
+  };
 
   /* phone alert engine */
   const fireAlert = useCallback((title, body, opts = {}) => {
@@ -892,22 +1071,24 @@ export default function LeagueHQ({ user, onSignOut }) {
   const nextDeadline = deadlines[0];
   const heroState = nextDeadline ? urgencyFor(nextDeadline.when) : "go";
 
+  const showDraft = draftToolsVisible(cfg, members, clock);
   const TABS = [
     { id: "coach", label: "Coach" },
     { id: "home", label: "Home" },
     { id: "week", label: "This week", panes: [["lineup", "Lineup"], ["matchup", "Matchup"], ["start", "Start / Sit"]] },
     { id: "moves", label: "Moves", panes: [["trades", "Trades"], ["waiver", "Waivers"], ["byes", "Byes"]] },
     { id: "league", label: "League", panes: [["teams", "Teams"], ["inbox", "Inbox"], ["chat", "Chat"]] },
-    { id: "draft", label: "Draft", panes: [["board", "Board"], ["build", "Builder"]] },
+    showDraft ? { id: "draft", label: "Draft", panes: [["board", "Board"], ["build", "Builder"]] } : null,
     { id: "settings", label: "Settings" },
-  ];
-  const pane = panes[tab];
-  const setPane = (id) => setPanes((s) => ({ ...s, [tab]: id }));
+  ].filter(Boolean);
+  const tabShown = (tab === "draft" && !showDraft) ? "coach" : tab;
+  const pane = panes[tabShown];
+  const setPane = (id) => setPanes((s) => ({ ...s, [tabShown]: id }));
   const go = (nextTab, nextPane) => {
     setTab(nextTab);
     if (nextPane) setPanes((s) => ({ ...s, [nextTab]: nextPane }));
   };
-  const activeTab = TABS.find((t) => t.id === tab);
+  const activeTab = TABS.find((t) => t.id === tabShown);
 
   if (!ready) {
     return (<div className="hq"><style>{CSS}</style><div className="wrap" style={{ paddingTop: 60, color: "var(--muted)" }}>Loading League HQ…</div></div>);
@@ -920,14 +1101,15 @@ export default function LeagueHQ({ user, onSignOut }) {
       <header className="top">
         <div className="topin">
           <div className="logo"><span className="mk">HQ</span> League HQ</div>
-          <span
-            className="leaguechip"
-            style={{ cursor: "pointer" }}
-            title="Sleeper, Yahoo, or ESPN — change in League → Teams"
-            onClick={() => go("league", "teams")}
-          >
-            <b>{cfg.league}</b> · {cfg.platform || "Sleeper"} · {cfg.teams}-team {cfg.scoring}
-          </span>
+          <LeaguePicker
+            leagues={leagues}
+            activeId={activeId}
+            cfg={cfg}
+            open={pickerOpen}
+            setOpen={setPickerOpen}
+            onSelect={switchLeague}
+            onAdd={() => { setPickerOpen(false); setAddingLeague(true); }}
+          />
           {(refreshing || lastRefresh) && (
             <span className="refreshline">{refreshing ? "Refreshing…" : fmtRefreshAgo(lastRefresh)}</span>
           )}
@@ -948,7 +1130,7 @@ export default function LeagueHQ({ user, onSignOut }) {
         <div className="topin" style={{ paddingTop: 0 }}>
           <nav className="nav">
             {TABS.map((t) => (
-              <button key={t.id} className={tab === t.id ? "on" : ""} onClick={() => setTab(t.id)}>
+              <button key={t.id} className={tabShown === t.id ? "on" : ""} onClick={() => setTab(t.id)}>
                 {t.id === "home" && nextDeadline && (
                   <span className="dot" style={{ background: `var(--${heroState})` }} />
                 )}
@@ -960,7 +1142,7 @@ export default function LeagueHQ({ user, onSignOut }) {
       </header>
 
       <main className="wrap">
-        {(tab === "coach" || tab === "home" || tab === "week") && clock && (
+        {(tabShown === "coach" || tabShown === "home" || tabShown === "week") && clock && (
           <div className="weekbanner">{clock.label}</div>
         )}
         {activeTab && activeTab.panes && (
@@ -970,10 +1152,10 @@ export default function LeagueHQ({ user, onSignOut }) {
             ))}
           </div>
         )}
-        {tab === "coach" && onboarded && (
-          <Coach cfg={cfg} board={board} members={members} slots={slots} go={go} nextDeadline={nextDeadline} clock={clock} />
+        {tabShown === "coach" && onboarded && (
+          <Coach cfg={cfg} board={board} members={members} slots={slots} go={go} nextDeadline={nextDeadline} clock={clock} aiStoreKey={lk(activeId, "coach")} />
         )}
-        {tab === "home" && (
+        {tabShown === "home" && (
           <Dashboard
             heroState={heroState}
             nextDeadline={nextDeadline}
@@ -984,42 +1166,54 @@ export default function LeagueHQ({ user, onSignOut }) {
             goFixWeek={() => go("week", "lineup")}
           />
         )}
-        {tab === "week" && pane === "lineup" && (
+        {tabShown === "week" && pane === "lineup" && (
           <Lineup cfg={cfg} board={board} members={members} slots={slots} setSlots={persistSlots} saved={savedLineup} setSaved={persistSavedLineup} />
         )}
-        {tab === "week" && pane === "matchup" && (
+        {tabShown === "week" && pane === "matchup" && (
           <Matchup cfg={cfg} slots={slots} board={board} members={members} setSavedLineup={persistSavedLineup} />
         )}
-        {tab === "week" && pane === "start" && (
+        {tabShown === "week" && pane === "start" && (
           <Moves cfg={cfg} board={board} members={members} pane="start" />
         )}
-        {tab === "moves" && pane === "trades" && (
+        {tabShown === "moves" && pane === "trades" && (
           <Trades cfg={cfg} board={board} members={members} offers={offers} setOffers={persistOffers} goLeague={() => go("league", "teams")} />
         )}
-        {tab === "moves" && (pane === "waiver" || pane === "byes") && (
+        {tabShown === "moves" && (pane === "waiver" || pane === "byes") && (
           <Moves cfg={cfg} board={board} members={members} pane={pane} />
         )}
-        {tab === "league" && pane === "teams" && (
+        {tabShown === "league" && pane === "teams" && (
           <League cfg={cfg} setCfg={persistCfg} members={members} setMembers={persistMembers} />
         )}
-        {tab === "league" && pane === "inbox" && (
+        {tabShown === "league" && pane === "inbox" && (
           <Inbox alerts={alerts} setAlerts={persistAlerts} me={me} sources={sources} />
         )}
-        {tab === "league" && pane === "chat" && (
+        {tabShown === "league" && pane === "chat" && (
           <GroupChat alerts={alerts} setAlerts={persistAlerts} offers={offers} setOffers={persistOffers} />
         )}
-        {tab === "draft" && pane === "board" && (
+        {tabShown === "draft" && pane === "board" && (
           <DraftRoom cfg={cfg} board={board} setBoard={persistBoard} />
         )}
-        {tab === "draft" && pane === "build" && (
+        {tabShown === "draft" && pane === "build" && (
           <RosterBuilder cfg={cfg} slots={slots} board={board} setBoard={persistBoard} members={members} saved={savedRoster} setSaved={persistSavedRoster} />
         )}
-        {tab === "settings" && (
+        {tabShown === "settings" && (
           <>
             <Reminders rem={rem} setRem={persistRem} deadlines={deadlines} cfg={cfg}
               alertsOn={alertsOn} notifPerm={notifPerm} enableAlerts={enableAlerts} testAlert={testAlert} />
             <div style={{ height: 14 }} />
-            <Setup cfg={cfg} setCfg={persistCfg} sources={sources} setSources={persistSources} resetBoard={() => persistBoard({})} restart={restartOnboarding} />
+            <Setup
+              cfg={cfg}
+              setCfg={persistCfg}
+              sources={sources}
+              setSources={persistSources}
+              resetBoard={() => persistBoard({})}
+              restart={restartOnboarding}
+              leagues={leagues}
+              activeId={activeId}
+              onAddLeague={() => setAddingLeague(true)}
+              onRemoveLeague={removeLeague}
+              showDraft={showDraft}
+            />
           </>
         )}
       </main>
@@ -1036,6 +1230,129 @@ export default function LeagueHQ({ user, onSignOut }) {
           goCoach={() => setTab("coach")}
         />
       )}
+      {addingLeague && (
+        <AddLeague
+          onCancel={() => setAddingLeague(false)}
+          onSave={addLeague}
+        />
+      )}
+    </div>
+  );
+}
+
+function LeaguePicker({ leagues, activeId, cfg, open, setOpen, onSelect, onAdd }) {
+  const box = useRef(null);
+  useEffect(() => {
+    if (!open) return;
+    const onDoc = (e) => { if (box.current && !box.current.contains(e.target)) setOpen(false); };
+    document.addEventListener("mousedown", onDoc);
+    return () => document.removeEventListener("mousedown", onDoc);
+  }, [open, setOpen]);
+  return (
+    <div className="lgpick" ref={box}>
+      <button type="button" className="leaguechip" onClick={() => setOpen(!open)} title="Switch or add a league">
+        <b>{cfg.league}</b> · {cfg.platform || "Sleeper"} · {cfg.teams}-team {cfg.scoring}
+        <span className="lgcaret">▾</span>
+      </button>
+      {open && (
+        <div className="lgmenu" role="listbox">
+          {(leagues || []).map((l) => (
+            <button key={l.id} type="button" className={"lgopt" + (l.id === activeId ? " on" : "")} onClick={() => onSelect(l.id)}>
+              <b>{l.name}</b>
+              <span>{l.platform}{l.teams ? " · " + l.teams + "-team " + (l.scoring || "") : ""}</span>
+            </button>
+          ))}
+          <button type="button" className="lgopt add" onClick={onAdd}>+ Add league</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AddLeague({ onCancel, onSave }) {
+  const [name, setName] = useState("");
+  const [platform, setPlatform] = useState("Sleeper");
+  const [leagueId, setLeagueId] = useState("");
+  const [members, setMembers] = useState([]);
+  const [cfg, setCfg] = useState({ ...DEFAULT_CFG, platform: "Sleeper" });
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState("");
+  const [importOk, setImportOk] = useState(false);
+  const hasTeams = members.length > 0;
+  const hasMine = members.some((m) => m.mine);
+  const isSleeper = platform === "Sleeper";
+
+  const doImport = async () => {
+    setBusy(true); setMsg(""); setImportOk(false);
+    try {
+      const result = await runLeagueImport(platform, leagueId, { ...DEFAULT_CFG, platform, leagueId, league: name || DEFAULT_CFG.league });
+      setMembers(result.members);
+      setCfg({ ...result.cfg, league: name || result.cfg.league });
+      const withRosters = result.members.filter((x) => x.roster && x.roster.length).length;
+      setMsg("Imported " + result.members.length + " managers" + (withRosters ? " with live rosters" : "") + " ✓");
+      setImportOk(true);
+    } catch (e) {
+      setCfg((s) => ({ ...s, platform, leagueId, league: name || s.league }));
+      setMsg(leagueImportError(platform, e));
+    }
+    setBusy(false);
+  };
+
+  const finish = () => {
+    onSave({
+      cfg: { ...cfg, platform, leagueId, league: name.trim() || cfg.league || "New league" },
+      members,
+    });
+  };
+
+  return (
+    <div className="ob" role="dialog" aria-modal="true" aria-labelledby="add-lg-title">
+      <div className="obcard">
+        <h2 id="add-lg-title">Add a league</h2>
+        <div className="lead">Sleeper, Yahoo, or ESPN — each league keeps its own roster, lineup, and coach notes.</div>
+        <div className="obf">
+          <label>League name</label>
+          <input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Work league" />
+        </div>
+        <div className="obf">
+          <label>Platform</label>
+          <select value={platform} onChange={(e) => { setPlatform(e.target.value); setCfg((s) => ({ ...s, platform: e.target.value })); }}>
+            {["Sleeper", "Yahoo", "ESPN"].map((p) => <option key={p} value={p}>{p}</option>)}
+          </select>
+        </div>
+        <div className="obf">
+          <label>League ID</label>
+          <input
+            value={leagueId}
+            onChange={(e) => setLeagueId(e.target.value)}
+            placeholder={isSleeper ? "e.g. 112233445566" : platform + " league ID"}
+          />
+          {isSleeper && <div className="hint">From sleeper.com/leagues/THIS-NUMBER/…</div>}
+        </div>
+        <button className="btn" onClick={doImport} disabled={busy || !leagueId.trim()}>{busy && <span className="spin" />}{busy ? "Importing…" : "Import"}</button>
+        {!isSleeper && (
+          <div className="note">Yahoo needs Connect in League → Teams after you add this. ESPN public leagues import with the numeric ID.</div>
+        )}
+        {msg && <div className="note" style={importOk ? { borderColor: "var(--go)" } : { borderColor: "var(--now)" }}>{msg}</div>}
+        {hasTeams && (
+          <div style={{ marginTop: 14 }}>
+            <div className="eyebrow">Pick your team</div>
+            {members.map((m, i) => (
+              <button type="button" key={i} className={"obteam" + (m.mine ? " on" : "")} onClick={() => setMembers(members.map((x, j) => ({ ...x, mine: j === i })))}>
+                <span>
+                  <div className="tn">{m.teamName || m.name || ("Team " + (i + 1))}</div>
+                  <div className="sub">{m.name}{m.roster && m.roster.length ? " · " + m.roster.length + " players" : ""}</div>
+                </span>
+                <span className="mark">{m.mine ? "★ My team" : "My team"}</span>
+              </button>
+            ))}
+          </div>
+        )}
+        <div className="obnav">
+          <button className="btn ghost" onClick={onCancel}>Cancel</button>
+          <button className="btn" onClick={finish} disabled={hasTeams && !hasMine}>{hasTeams ? "Add league" : "Add without import"}</button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -1109,16 +1426,16 @@ function Onboarding({ cfg, setCfg, members, setMembers, setSlots, onDone, goCoac
         {step === 1 && (
           <>
             <h2 id="ob-title">Your workspace code</h2>
-            <div className="lead">This is a shared password for one league. You already entered it at sign-in.</div>
+            <div className="lead">This workspace can hold every league you run — Sleeper, Yahoo, or ESPN. You already entered the code at sign-in.</div>
             <div className="obcode">{workspace || "—"}</div>
-            <div className="note">If a co-manager will share this team, both of you must enter the <b>same</b> code. Solo? You can ignore this.</div>
+            <div className="note">A co-manager who enters the <b>same</b> code sees the same leagues. Solo? You can ignore this. Add more leagues later from the name in the header.</div>
           </>
         )}
 
         {step === 2 && (
           <>
             <h2 id="ob-title">Connect your league</h2>
-            <div className="lead">Import live rosters so Coach knows your team.</div>
+            <div className="lead">Import this first league so Coach knows your team. You can add others from the header afterward.</div>
             <div className="obf">
               <label>Platform</label>
               <select value={platform} onChange={(e) => { setPlatform(e.target.value); set({ platform: e.target.value }); }}>
@@ -1227,7 +1544,7 @@ function Toast({ toast, onClose }) {
 const COACH_SYS = (teams, scoring, format) =>
   "You are the user's fantasy football head coach for a " + teams + "-team " + scoring + " league (" + format + "). It is head-to-head. If web_search is available, use it for THIS WEEK's projections, injuries, inactives, and news. Using my roster, my next opponent, and brief notes on other teams, tell me EXACTLY what to do this week to win — a SHORT prioritized action list, most important first. Only include actions that need doing now; if my team is already optimal, say so. For lineup advice, be opponent-aware (protect the floor if I'm favored, chase ceiling if I'm the underdog). For trades, name the specific manager to target and the exact offer. Respond with ONLY JSON, no prose: {\"deadline\":\"e.g. Lineup locks Sun 1:00pm ET\",\"allSet\":false,\"actions\":[{\"type\":\"lineup|trade|waiver|drop|none\",\"priority\":1,\"verdict\":\"one imperative line, e.g. Start Puka over Waddle\",\"why\":\"2-3 sentences of reasoning\",\"copy\":\"optional text to copy, e.g. a trade message to send\"}]}";
 
-function Coach({ cfg, board, members, slots, go, nextDeadline, clock }) {
+function Coach({ cfg, board, members, slots, go, nextDeadline, clock, aiStoreKey }) {
   const [busy, setBusy] = useState(false);
   const [hydrated, setHydrated] = useState(false);
   const [err, setErr] = useState("");
@@ -1260,7 +1577,7 @@ function Coach({ cfg, board, members, slots, go, nextDeadline, clock }) {
       const next = { deadline: j.deadline || (nextDeadline ? nextDeadline.label : ""), allSet: !!j.allSet, actions };
       setData(next);
       setCachedAt(Date.now());
-      saveAiAdvice("coach", cacheKey, next);
+      saveAiAdvice("coach", cacheKey, next, aiStoreKey);
     } catch (e) {
       setErr(advisorError(e));
     }
@@ -1269,14 +1586,14 @@ function Coach({ cfg, board, members, slots, go, nextDeadline, clock }) {
 
   useEffect(() => {
     let cancelled = false;
-    loadAiAdvice("coach", cacheKey).then((rec) => {
+    loadAiAdvice("coach", cacheKey, aiStoreKey).then((rec) => {
       if (cancelled) return;
       if (rec) { setData(rec.value); setCachedAt(rec.at); }
       else { setData(null); setCachedAt(null); }
       setHydrated(true);
     });
     return () => { cancelled = true; };
-  }, [cacheKey]);
+  }, [cacheKey, aiStoreKey]);
 
   const deadlineLine = data && data.deadline ? (
     <div className="eyebrow" style={{ margin: "16px 0 12px" }}>Next deadline: {data.deadline}</div>
@@ -2194,7 +2511,7 @@ function League({ cfg, setCfg, members, setMembers }) {
         ))}
         <button className="btn ghost sm" onClick={add} style={{ marginTop: 8 }}>+ Add manager</button>
       </div>
-      <div className="note">Mark <b>My team</b> and Trades, Moves, and the bye planner all run off your real roster instead of manual notes. Shared with your co-manager.</div>
+      <div className="note">Mark <b>My team</b> and Trades, Moves, and the bye planner all run off your real roster. This is the active league — switch or add Yahoo / ESPN / Sleeper leagues from the name in the header.</div>
     </div>
   );
 }
@@ -2727,13 +3044,14 @@ function Matchup({ cfg, slots, board, members, setSavedLineup }) {
 }
 
 /* ---------- Setup ---------- */
-function Setup({ cfg, setCfg, sources, setSources, resetBoard, restart }) {
+function Setup({ cfg, setCfg, sources, setSources, resetBoard, restart, leagues, activeId, onAddLeague, onRemoveLeague, showDraft }) {
   const set = (patch) => setCfg({ ...cfg, ...patch });
   const setSrc = (patch) => setSources({ ...sources, ...patch });
+  const draftMode = cfg.showDraft === true ? "on" : cfg.showDraft === false ? "off" : "auto";
   return (
     <div className="grid g2">
       <div className="card">
-        <h3>League</h3>
+        <h3>This league</h3>
         <div className="field"><label>League name</label><input value={cfg.league} onChange={(e) => set({ league: e.target.value })} /></div>
         <div className="field"><label>Platform</label>
           <select value={cfg.platform || "Sleeper"} onChange={(e) => set({ platform: e.target.value })}>
@@ -2766,12 +3084,37 @@ function Setup({ cfg, setCfg, sources, setSources, resetBoard, restart }) {
           </select>
         </div>
         <div className="field"><label>Draft date</label><input type="datetime-local" value={cfg.draftDate} onChange={(e) => set({ draftDate: e.target.value })} /></div>
-
-        <div className="note">Everything here is <b>shared</b> — your co-manager sees the same league setup, draft board, and reminders. The only thing that's personal is which Gmail an inbox scan reads.</div>
+        <div className="field"><label>Draft tab</label>
+          <select value={draftMode} onChange={(e) => set({ showDraft: e.target.value === "auto" ? null : e.target.value === "on" })}>
+            <option value="auto">Hide after the draft</option>
+            <option value="on">Always show</option>
+            <option value="off">Always hide</option>
+          </select>
+        </div>
+        <div className="note">{showDraft ? "Draft tools are visible for this league." : "Draft is hidden for this league — the season (or draft date) has passed."} Shared with your co-manager. The only personal piece is which Gmail an inbox scan reads.</div>
         <div style={{ marginTop: 12, display: "flex", gap: 8, flexWrap: "wrap" }}>
           <button className="btn ghost sm" onClick={() => { if (confirm("Clear all draft-board picks?")) resetBoard(); }}>Reset draft board</button>
           <button className="btn ghost sm" onClick={restart}>Re-run first-time setup</button>
         </div>
+      </div>
+
+      <div className="card">
+        <h3>Your leagues</h3>
+        <div className="empty" style={{ paddingTop: 0 }}>Switch leagues from the header. Each can be a different platform.</div>
+        {(leagues || []).map((l) => (
+          <div className="memrow" key={l.id} style={{ paddingTop: 10 }}>
+            <div className="memtop">
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontWeight: 800, fontSize: 14 }}>{l.name}{l.id === activeId ? " · active" : ""}</div>
+                <div className="rosterline" style={{ margin: "4px 0 0" }}>{l.platform}{l.teams ? " · " + l.teams + "-team " + (l.scoring || "") : ""}</div>
+              </div>
+              {leagues.length > 1 && (
+                <button className="btn ghost sm" onClick={() => { if (confirm("Remove " + l.name + " from this workspace? Data stays stored but it leaves the switcher.")) onRemoveLeague(l.id); }}>Remove</button>
+              )}
+            </div>
+          </div>
+        ))}
+        <button className="btn ghost sm" onClick={onAddLeague} style={{ marginTop: 10 }}>+ Add league</button>
       </div>
 
       <div className="card">
