@@ -58,8 +58,6 @@
 .lgopt.add{color:var(--gold);font-weight:800;font-size:13px;flex-direction:row;align-items:center}
 .refreshline{font-size:11px;color:var(--gold);font-weight:600;letter-spacing:.02em;white-space:nowrap}
 .spacer{flex:1}
-.me{font-size:12px;color:var(--muted);display:flex;align-items:center;gap:6px}
-.me select{background:var(--panel);color:var(--ink);border:1px solid var(--line);border-radius:8px;padding:5px 8px;font-size:12px}
 
 /* nav */
 .nav{display:flex;gap:4px;overflow:auto;padding:8px 0 0}

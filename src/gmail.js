@@ -4,18 +4,9 @@ import { getFirebase } from "./firebase";
 const GMAIL_SCOPE = "https://www.googleapis.com/auth/gmail.readonly";
 const TOKEN_KEY = "leaguehq:gmailToken";
 
-const PLATFORM_SENDERS = [
-  "noreply@sleeper.app",
-  "sleeper.app",
-  "fantasy@email.espn.com",
-  "email.espn.com",
-  "noreply@fantasy.yahoo.com",
-  "comms.yahoo.com",
-  "fantasy.yahoo.com",
-];
-
-const MAIL_NOISE = /oauth|unused client|google developers|accounts\.google|security alert|password reset|verify your email|invoice|receipt|shipping|order confirmation|newsletter|unsubscribe|promo code/i;
-const MAIL_SIGNAL = /sleeper|espn|yahoo fantasy|fantasy football|commissioner|waiver|trade offer|trade proposed|lineup|draft|injury|questionable|inactive|doubtful|suspension|faab|free agent|commish|league/i;
+const SLEEPER_FROM = /sleeper\.app/i;
+const INTEL_CATS = /^(trade|injury|waiver|lineup|deadline|draft)$/;
+const MAIL_NOISE = /oauth|unused client|google developers|accounts\.google|security alert|password reset|verify your email|invoice|receipt|shipping|order confirmation|newsletter|unsubscribe|promo code|toyota|sienna|crypto|now hiring|new-car|vehicle care/i;
 
 export function hasGmailToken() {
   try {
@@ -42,39 +33,8 @@ export async function connectGmail() {
   return token;
 }
 
-function splitList(raw) {
-  return String(raw || "")
-    .split(/[,;]+/)
-    .map((s) => s.trim())
-    .filter(Boolean);
-}
-
-function quotePhrase(s) {
-  const t = String(s || "").replace(/"/g, "").trim();
-  return t.includes(" ") ? `"${t}"` : t;
-}
-
-export function buildGmailQuery(sources, cfg) {
-  const parts = ["newer_than:14d", "-category:promotions", "-category:social"];
-  const clauses = [];
-  const froms = new Set(PLATFORM_SENDERS);
-  splitList(sources?.senders).forEach((s) => froms.add(s.replace(/^from:/i, "")));
-  froms.forEach((s) => clauses.push("from:" + s));
-
-  const league = String(cfg?.league || "").trim();
-  if (league && !/^fantasy league #\d+$/i.test(league)) {
-    clauses.push("subject:" + quotePhrase(league));
-    clauses.push(quotePhrase(league));
-  }
-
-  splitList(sources?.people).forEach((p) => {
-    if (p.includes("@")) clauses.push("from:" + p);
-    else clauses.push("(" + quotePhrase(p) + " (fantasy OR sleeper OR espn OR yahoo OR commissioner OR waiver OR trade))");
-  });
-
-  splitList(sources?.labels).forEach((s) => parts.push("label:" + s.replace(/\s+/g, "-")));
-  parts.push("(" + clauses.join(" OR ") + ")");
-  return parts.join(" ");
+export function buildGmailQuery() {
+  return "newer_than:21d from:sleeper.app";
 }
 
 function headerVal(headers, name) {
@@ -109,15 +69,11 @@ function textFromPayload(payload) {
   return t.replace(/\s+/g, " ").trim().slice(0, 700);
 }
 
-export function isLeagueMail(message, cfg) {
-  const hay = [message?.from, message?.subject, message?.snippet, message?.body].filter(Boolean).join(" ");
-  if (!hay.trim()) return false;
-  if (MAIL_NOISE.test(hay)) return false;
-  if (MAIL_SIGNAL.test(hay)) return true;
-  const league = String(cfg?.league || "").trim().toLowerCase();
-  if (league && league.length > 3 && !/^fantasy league #\d+$/i.test(league) && hay.toLowerCase().includes(league)) return true;
-  const from = String(message?.from || "").toLowerCase();
-  return PLATFORM_SENDERS.some((s) => from.includes(s.toLowerCase()));
+export function isSleeperMail(message) {
+  const from = String(message?.from || "");
+  if (!SLEEPER_FROM.test(from)) return false;
+  const hay = [message?.subject, message?.snippet, message?.body].filter(Boolean).join(" ");
+  return !MAIL_NOISE.test(from + " " + hay);
 }
 
 export function isNoiseIntel(item) {
@@ -125,13 +81,20 @@ export function isNoiseIntel(item) {
   return MAIL_NOISE.test(hay);
 }
 
-export async function fetchGmailMessages(sources, cfg) {
+export function isWinningIntel(item) {
+  if (!item || isNoiseIntel(item)) return false;
+  if (!INTEL_CATS.test(String(item.category || "").toLowerCase())) return false;
+  if (!String(item.summary || "").trim() || !String(item.action || "").trim()) return false;
+  return true;
+}
+
+export async function fetchGmailMessages() {
   let token;
   try { token = sessionStorage.getItem(TOKEN_KEY); } catch { token = ""; }
   if (!token) token = await connectGmail();
 
   const headers = { Authorization: "Bearer " + token };
-  const q = encodeURIComponent(buildGmailQuery(sources, cfg));
+  const q = encodeURIComponent(buildGmailQuery());
   const listRes = await fetch(
     "https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=15&q=" + q,
     { headers }
@@ -168,7 +131,7 @@ export async function fetchGmailMessages(sources, cfg) {
       body: textFromPayload(m.payload),
     };
   }));
-  return messages.filter(Boolean).filter((m) => isLeagueMail(m, cfg)).slice(0, 8);
+  return messages.filter(Boolean).filter(isSleeperMail).slice(0, 8);
 }
 
 export function messagesToDump(messages) {
@@ -177,8 +140,8 @@ export function messagesToDump(messages) {
   ).join("\n---\n");
 }
 
-export function triageLocal(messages, cfg) {
-  return (messages || []).filter((m) => isLeagueMail(m, cfg)).map((m) => {
+export function triageLocal(messages) {
+  return (messages || []).filter(isSleeperMail).map((m) => {
     const hay = `${m.from} ${m.subject} ${m.snippet || m.body || ""}`.toLowerCase();
     let category = "league";
     let urgency = "fyi";
@@ -195,7 +158,7 @@ export function triageLocal(messages, cfg) {
       deadline: "",
       player: "",
     };
-  });
+  }).filter(isWinningIntel);
 }
 
 export function parsePastedMail(raw) {

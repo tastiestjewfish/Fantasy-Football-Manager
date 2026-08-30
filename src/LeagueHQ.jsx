@@ -3,7 +3,7 @@ import storage from "./storage";
 import { getWorkspaceId } from "./firebase";
 import { apiFetch, apiJson, errText, errFromApiBody } from "./api";
 import { importSleeperLeague, sleeperNextOpponentDirect, nflSeasonClock, getNflPlayers } from "./sleeper";
-import { connectGmail, fetchGmailMessages, hasGmailToken, isNoiseIntel, messagesToDump, parsePastedMail, triageLocal } from "./gmail";
+import { connectGmail, fetchGmailMessages, hasGmailToken, isWinningIntel, messagesToDump, triageLocal } from "./gmail";
 
 /* =========================================================================
    LEAGUE HQ — Fantasy Football Co-Manager
@@ -97,14 +97,8 @@ const DEFAULT_CFG = {
   format: "Standard (1 QB)", slot: "", draftDate: "", leagueId: "", connectorUrl: "", showDraft: null,
 };
 const DEFAULT_REM = { lineupDay: 0, lineupTime: "11:00", waiverDay: 2, waiverTime: "22:00", tradeDeadline: "" };
-function defaultSources(platform) {
-  const primary = platform === "Yahoo" ? "noreply@fantasy.yahoo.com"
-    : platform === "ESPN" ? "fantasy@email.espn.com"
-    : "noreply@sleeper.app";
-  const senders = [primary, "noreply@sleeper.app", "fantasy@email.espn.com", "noreply@fantasy.yahoo.com"]
-    .filter((v, i, a) => a.indexOf(v) === i)
-    .join(", ");
-  return { senders, people: "", keywords: "trade offer, waiver, injury, questionable, inactive, suspension", labels: "" };
+function defaultSources() {
+  return { senders: "noreply@sleeper.app", people: "", keywords: "", labels: "" };
 }
 const LEGACY_KIND = {
   config: "league:config", members: "league:members", board: "draft:board", rem: "reminders:config",
@@ -614,7 +608,6 @@ export default function LeagueHQ({ user, onSignOut }) {
   const [tab, setTab] = useState("coach");
   const [panes, setPanes] = useState({ week: "lineup", moves: "trades", league: "teams", draft: "board" });
   const [ready, setReady] = useState(false);
-  const [me, setMe] = useState("A");
 
   const [cfg, setCfg] = useState(DEFAULT_CFG);
   const [board, setBoard] = useState({});            // {playerId: 'mine'|'gone'}
@@ -642,12 +635,15 @@ export default function LeagueHQ({ user, onSignOut }) {
   const activeIdRef = useRef("default");
   const switchingRef = useRef(false);
 
-  const applyBundle = (bundle) => {
+  const applyBundle = (bundle, leagueId) => {
     setCfg(bundle.cfg);
     setMembers(bundle.members);
     setBoard(bundle.board);
     setRem(bundle.rem);
-    setAlerts(bundle.alerts);
+    const rawAlerts = Array.isArray(bundle.alerts) ? bundle.alerts : [];
+    const cleanedAlerts = rawAlerts.filter(isWinningIntel);
+    setAlerts(cleanedAlerts);
+    if (leagueId && cleanedAlerts.length !== rawAlerts.length) saveKey(lk(leagueId, "alerts"), cleanedAlerts);
     setSources(bundle.sources);
     setOffers(bundle.offers);
     setSlots(bundle.slots);
@@ -691,7 +687,7 @@ export default function LeagueHQ({ user, onSignOut }) {
       activeIdRef.current = nextId;
       setLeagues(index);
       setActiveId(nextId);
-      applyBundle(bundle);
+      applyBundle(bundle, nextId);
       setOnboarded(await loadKey("me:onboarded", false, false));
       await loadAnthropicWorkspaceId();
       await loadUseWebSearch();
@@ -746,7 +742,7 @@ export default function LeagueHQ({ user, onSignOut }) {
     setPickerOpen(false);
     setRefreshing(true);
     const bundle = await loadLeagueBundle(id);
-    applyBundle(bundle);
+    applyBundle(bundle, id);
     activeIdRef.current = id;
     setActiveId(id);
     saveKey("me:activeLeagueId", id, false);
@@ -864,13 +860,6 @@ export default function LeagueHQ({ user, onSignOut }) {
             <span className="refreshline">{refreshing ? "Refreshing…" : fmtRefreshAgo(lastRefresh)}</span>
           )}
           <span className="spacer" />
-          <span className="me">
-            You are
-            <select value={me} onChange={(e) => setMe(e.target.value)}>
-              <option value="A">Manager A</option>
-              <option value="B">Manager B</option>
-            </select>
-          </span>
           {onSignOut && (
             <button type="button" className="btn ghost sm" onClick={onSignOut} title={user?.email || "Sign out"}>
               Sign out
@@ -954,8 +943,6 @@ export default function LeagueHQ({ user, onSignOut }) {
             <Setup
               cfg={cfg}
               setCfg={persistCfg}
-              sources={sources}
-              setSources={persistSources}
               resetBoard={() => persistBoard({})}
               restart={restartOnboarding}
               leagues={leagues}
@@ -1468,10 +1455,10 @@ function Dashboard({ heroState, nextDeadline, deadlines, alerts, goInbox, goSett
       <div className="grid g2">
         <div className="card">
           <div className="cardhead"><h3>League intel</h3><button className="btn ghost sm" onClick={goInbox}>Scan mail</button></div>
-          {alerts.filter((a) => a.urgency !== "fyi" && !isNoiseIntel(a)).length === 0 ? (
-            <div className="empty">No trades, injuries, or deadlines from league mail yet. Scan mail and we’ll pull only what helps you win.</div>
+          {alerts.filter(isWinningIntel).length === 0 ? (
+            <div className="empty">No Sleeper moves yet. Scan mail and we’ll only surface trades, injuries, and deadlines — never your inbox.</div>
           ) : (
-            alerts.filter((a) => a.urgency !== "fyi" && !isNoiseIntel(a)).slice(0, 5).map((a, i) => (
+            alerts.filter(isWinningIntel).slice(0, 5).map((a, i) => (
               <div className="alert" key={i}>
                 <div className={"bar bar-" + (a.urgency === "now" ? "now" : "soon")} />
                 <div className="body">
@@ -1638,58 +1625,43 @@ async function triageWithClaude(dump, sources, cfg, members) {
   );
   const json = extractJSON(text);
   const items = Array.isArray(json.items) ? json.items : [];
-  return items.filter((a) => a && (a.summary || a.action) && !isNoiseIntel(a));
+  return items.filter(isWinningIntel);
 }
 
 function Inbox({ alerts, setAlerts, sources, cfg, members }) {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
-  const useful = (alerts || []).filter((a) => !isNoiseIntel(a));
+  const useful = (alerts || []).filter(isWinningIntel);
   const [scanned, setScanned] = useState(useful.length > 0);
   const [gmailOn, setGmailOn] = useState(() => hasGmailToken());
-  const [paste, setPaste] = useState("");
 
   const applyItems = (items) => {
-    const next = (items || []).filter((a) => a && !isNoiseIntel(a));
+    const next = (items || []).filter(isWinningIntel);
     setAlerts(next);
     setScanned(true);
-    setErr(next.length ? "" : "No trades, injuries, or deadlines in that league mail. Add the commissioner in Settings if they email from a personal address.");
-  };
-
-  const scanMessages = async (messages) => {
-    const dump = messagesToDump(messages);
-    try {
-      applyItems(await triageWithClaude(dump, sources, cfg, members));
-    } catch {
-      applyItems(triageLocal(messages, cfg));
-    }
+    setErr(next.length ? "" : "No trades, injuries, or deadlines in recent Sleeper mail.");
   };
 
   const scanGmail = async () => {
     setBusy(true); setErr("");
     try {
-      const messages = await fetchGmailMessages(sources, cfg);
+      const messages = await fetchGmailMessages();
       setGmailOn(true);
       if (!messages.length) {
-        setErr("No league mail in the last 14 days. Add your commissioner or a Gmail label in Settings, or paste a Sleeper/ESPN/Yahoo notice below.");
+        setAlerts([]);
+        setScanned(true);
+        setErr("No Sleeper mail in the last 21 days — nothing to act on.");
         setBusy(false);
         return;
       }
-      await scanMessages(messages);
+      const dump = messagesToDump(messages);
+      try {
+        applyItems(await triageWithClaude(dump, sources, cfg, members));
+      } catch {
+        applyItems(triageLocal(messages));
+      }
     } catch (e) {
-      setErr(e?.message || "Couldn't scan Gmail. Paste a league notice below instead.");
-    }
-    setBusy(false);
-  };
-
-  const scanPaste = async () => {
-    const messages = parsePastedMail(paste);
-    if (!messages.length) { setErr("Paste a Sleeper, ESPN, or Yahoo league notice, then scan."); return; }
-    setBusy(true); setErr("");
-    try {
-      await scanMessages(messages);
-    } catch (e) {
-      setErr(e?.message || "Couldn't scan that text.");
+      setErr(e?.message || "Couldn't read Sleeper mail. Connect Gmail and try again.");
     }
     setBusy(false);
   };
@@ -1707,14 +1679,18 @@ function Inbox({ alerts, setAlerts, sources, cfg, members }) {
             try { await connectGmail(); setGmailOn(true); }
             catch (e) { setErr(e?.message || "Couldn't connect Gmail."); }
           }}>{gmailOn ? "Gmail connected" : "Connect Gmail"}</button>
-          <DoMe onClick={scanGmail} busy={busy} working="Scanning…" />
+          <DoMe onClick={scanGmail} busy={busy} working="Reading Sleeper…" />
         </div>
       </div>
 
       {err && <div className="note" style={{ borderColor: "var(--now)", color: "var(--ink)" }}>{err}</div>}
 
       {!scanned && !busy && !err && (
-        <div className="empty">We don’t list your inbox. Scan Gmail (or paste a league notice) and we’ll pull only trades, injuries, waivers, and deadlines that help you win.</div>
+        <div className="empty">Reads Sleeper mail in the background and keeps only moves that help you win — trades, injuries, waivers, deadlines. Your inbox is never listed.</div>
+      )}
+
+      {scanned && !busy && !sorted.length && !err && (
+        <div className="empty">Nothing in Sleeper mail that changes your lineup or waivers.</div>
       )}
 
       {sorted.map((a, i) => (
@@ -1725,31 +1701,14 @@ function Inbox({ alerts, setAlerts, sources, cfg, members }) {
             {a.action && <div className="s">{a.action}</div>}
             <div className="meta">
               <span>{a.category}</span>
-              <span>{a.urgency}</span>
               {a.deadline && <span>⏱ {a.deadline}</span>}
               {a.player && <span>{a.player}</span>}
             </div>
           </div>
-          <div style={{ flex: "none" }}>
-            <button className="btn ghost sm" onClick={() => {
-              const when = new Date(Date.now() + 2 * 3600000);
-              downloadICS("FF: " + (a.action || a.summary || "Roster move"), when, { desc: (a.summary || "") + (a.deadline ? " — due " + a.deadline : "") });
-            }}>Add reminder</button>
-          </div>
         </div>
       ))}
 
-      <textarea
-        className="mailpaste"
-        value={paste}
-        onChange={(e) => setPaste(e.target.value)}
-        placeholder="Or paste a Sleeper / ESPN / Yahoo league notice here…"
-      />
-      <div style={{ marginTop: 8 }}>
-        <button className="btn ghost sm" onClick={scanPaste} disabled={busy || !paste.trim()}>Scan pasted notice</button>
-      </div>
-
-      <div className="note">Read-only Gmail scan of <b>league platforms</b> (Sleeper, ESPN, Yahoo) plus anyone you add in Settings. Intel is shared with your co-manager. We never show your full inbox.</div>
+      <div className="note">Only opens mail from <b>sleeper.app</b>. Shared with your co-manager. We never show your inbox.</div>
     </div>
   );
 }
@@ -2809,9 +2768,8 @@ function Matchup({ cfg, slots, board, members, setSavedLineup }) {
 }
 
 /* ---------- Setup ---------- */
-function Setup({ cfg, setCfg, sources, setSources, resetBoard, restart, leagues, activeId, onAddLeague, onRemoveLeague, showDraft }) {
+function Setup({ cfg, setCfg, resetBoard, restart, leagues, activeId, onAddLeague, onRemoveLeague, showDraft }) {
   const set = (patch) => setCfg({ ...cfg, ...patch });
-  const setSrc = (patch) => setSources({ ...sources, ...patch });
   const draftMode = cfg.showDraft === true ? "on" : cfg.showDraft === false ? "off" : "auto";
   return (
     <div className="grid g2">
@@ -2883,12 +2841,8 @@ function Setup({ cfg, setCfg, sources, setSources, resetBoard, restart, leagues,
       </div>
 
       <div className="card">
-        <h3>Email sources</h3>
-        <div className="field"><label>Platform emails</label><input value={sources.senders} onChange={(e) => setSrc({ senders: e.target.value })} /></div>
-        <div className="field"><label>Leaguemates &amp; commissioner</label><input value={sources.people} onChange={(e) => setSrc({ people: e.target.value })} /></div>
-        <div className="field"><label>Keywords to flag</label><input value={sources.keywords} onChange={(e) => setSrc({ keywords: e.target.value })} /></div>
-        <div className="field"><label>Gmail labels</label><input value={sources.labels} onChange={(e) => setSrc({ labels: e.target.value })} /></div>
-        <div className="note">The scan only opens mail from these platforms and people — not your whole inbox. Keywords help the scanner decide what matters for winning. Shared with your co-manager. Run it under League → Intel.</div>
+        <h3>Sleeper mail</h3>
+        <div className="empty" style={{ paddingTop: 0 }}>League → Intel only reads mail from sleeper.app. It never lists your inbox. Shared with your co-manager.</div>
       </div>
     </div>
   );
