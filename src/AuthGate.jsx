@@ -11,52 +11,20 @@ import {
   subscribeAuth,
 } from "./firebase";
 
-const CSS = `
-:root{
-  --bg:#0E1622; --bg2:#080D15; --panel:#16202E; --panel2:#1B2838;
-  --line:#26374A; --ink:#EAF1F8; --muted:#8595A6; --muted2:#5E6E80;
-  --brand:#57E39A; --now:#FF4B3E;
-  --sans:"Helvetica Neue",Arial,system-ui,sans-serif;
-}
-*{box-sizing:border-box}
-.hq{background:var(--bg);color:var(--ink);font-family:var(--sans);min-height:100vh;
-  -webkit-font-smoothing:antialiased}
-.gate{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px;
-  background:radial-gradient(900px 280px at 20% -10%,rgba(87,227,154,.10),transparent),var(--bg)}
-.gatecard{background:var(--panel);border:1px solid var(--line);border-radius:16px;max-width:440px;width:100%;
-  padding:28px 26px 24px;box-shadow:0 24px 64px rgba(0,0,0,.45)}
-.gatelogo{font-weight:800;letter-spacing:-.02em;font-size:22px;display:flex;align-items:center;gap:9px;margin-bottom:18px}
-.gatelogo .mk{width:24px;height:24px;border-radius:6px;background:var(--brand);display:inline-grid;place-items:center;
-  color:#062012;font-weight:900;font-size:13px}
-.gatecard h1{margin:0 0 8px;font-size:24px;letter-spacing:-.02em;font-weight:800}
-.gatecard .lead{color:var(--muted);font-size:14px;line-height:1.6;margin:0 0 22px}
-.gbtn{width:100%;display:flex;align-items:center;justify-content:center;gap:10px;background:#fff;color:#1f1f1f;
-  border:0;border-radius:10px;font-weight:700;font-size:14px;padding:12px 15px;cursor:pointer;font-family:inherit}
-.gbtn:hover{filter:brightness(.97)}
-.gbtn:disabled{opacity:.6;cursor:default}
-.btn{background:var(--brand);color:#062012;border:0;border-radius:10px;font-weight:800;font-size:13px;padding:10px 15px;
-  letter-spacing:.01em;cursor:pointer;font-family:inherit;width:100%}
-.btn:hover{filter:brightness(1.05)}
-.btn:disabled{opacity:.5;cursor:default}
-.field{margin-bottom:14px}
-.field label{display:block;font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);
-  font-weight:700;margin-bottom:5px}
-.field input{width:100%;background:var(--panel2);color:var(--ink);border:1px solid var(--line);
-  border-radius:9px;padding:10px 11px;font-size:14px;font-family:inherit}
-.note{font-size:12px;color:var(--muted);line-height:1.55;background:var(--panel2);border:1px solid var(--line);
-  border-radius:10px;padding:12px;margin:0 0 16px}
-.err{color:var(--now);font-size:13px;margin:0 0 14px;line-height:1.45}
-.hint{font-size:12px;color:var(--muted2);margin-top:6px}
-.muted{color:var(--muted);font-size:14px}
-`;
-
 function Shell({ children }) {
   return (
     <div className="hq">
-      <style>{CSS}</style>
       <div className="gate">
         <div className="gatecard">
-          <div className="gatelogo"><span className="mk">HQ</span> League HQ</div>
+          <div className="gatelogo">
+            <span className="mk" aria-hidden="true">
+              <svg width="18" height="18" viewBox="0 0 24 24"><path fill="currentColor" d="M3 12.2h9.4l-2.1-3.2L21 12.2l-10.7 3.2 2.1-3.2H3z"/></svg>
+            </span>
+            <span className="gatetxt">
+              <span className="gatename">League HQ</span>
+              <span className="gatesub">Seminoles fantasy desk</span>
+            </span>
+          </div>
           {children}
         </div>
       </div>
@@ -211,7 +179,7 @@ export default function AuthGate({ children }) {
               autoFocus
               value={code}
               onChange={(e) => setCode(e.target.value)}
-              placeholder="e.g. hawks-2026"
+              placeholder="e.g. noles-2026"
             />
             {preview.length >= 4 ? <div className="hint">You’ll join: {preview}</div> : <div className="hint">At least 4 letters or numbers.</div>}
           </div>
