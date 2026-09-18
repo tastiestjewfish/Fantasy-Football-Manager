@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef, useCallback } from "react";
 import { PLAYERS, loadFantasyBoard } from "../lib/players.js";
 import { localRoster, slotEligible, activeRoster } from "../lib/lineup.js";
 import { callClaude, advisorError, extractJSON, MODEL_FAST } from "../lib/ai.js";
+import { strategyForDraft } from "../lib/strategy.js";
 import { copyText } from "../lib/format.js";
 import { AiResultBar, DoMe, PlayerDataBar, useAiResult } from "./shared.jsx";
 
@@ -63,7 +64,17 @@ function RosterBuilder({ cfg, slots, board, setBoard, members, saved, setSaved }
         : `${p.name} (${p.pos}, ADP ${rank})`;
     }).join("; ");
     const boardLabel = live ? "current Sleeper search_rank board" : "cached ADP board";
-    const sys = "You are a fantasy football roster architect for a " + cfg.teams + "-team " + cfg.scoring + " league (" + cfg.format + "). " + where + " Fill every slot in order: " + fullSlots.join(", ") + " using the " + boardLabel + " in the user message. Keep each 'why' to a few words. Respond with ONLY JSON, no prose: {\"roster\":[{\"slot\":\"\",\"player\":\"\",\"pos\":\"\",\"tier\":\"\",\"adp\":\"\",\"why\":\"\"}],\"alternates\":[{\"player\":\"\",\"pos\":\"\",\"note\":\"\"}],\"avoid\":[{\"player\":\"\",\"why\":\"\"}],\"sources\":[\"" + (live ? "Sleeper search_rank" : "ADP board") + "\"],\"summary\":\"one line strategy\"}. roster must have exactly " + fullSlots.length + " entries in slot order.";
+    const sys = [
+      "You are a fantasy football roster architect for a " + cfg.teams + "-team " + cfg.scoring + " league (" + cfg.format + ").",
+      strategyForDraft(),
+      where,
+      "Fill every slot in order: " + fullSlots.join(", ") + " using the " + boardLabel + " in the user message.",
+      "Each 'why' must reflect strategic reasoning in plain language (scarcity, tier, bye, upside vs floor) — not name fame. Keep why short.",
+      "Respond with ONLY JSON, no prose:",
+      "{\"roster\":[{\"slot\":\"\",\"player\":\"\",\"pos\":\"\",\"tier\":\"\",\"adp\":\"\",\"why\":\"\"}],\"alternates\":[{\"player\":\"\",\"pos\":\"\",\"note\":\"\"}],\"avoid\":[{\"player\":\"\",\"why\":\"\"}],\"sources\":[\""
+        + (live ? "Sleeper search_rank" : "ADP board")
+        + "\"],\"summary\":\"one line strategy\"}. roster must have exactly " + fullSlots.length + " entries in slot order.",
+    ].join(" ");
     try {
       const j = extractJSON(await callClaude([{ role: "user", content: (live ? "Rank board" : "ADP board") + " (best available first): " + boardLine }], { system: sys, model: MODEL_FAST, max_tokens: 1500 }));
       if (!j || !Array.isArray(j.roster) || !j.roster.length) throw new Error("empty");

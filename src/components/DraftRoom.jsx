@@ -1,6 +1,7 @@
 import React, { useState } from "react";
 import { PLAYERS, tierOf } from "../lib/players.js";
 import { callClaude, advisorError, MODEL_FAST } from "../lib/ai.js";
+import { strategyForDraft } from "../lib/strategy.js";
 import { AiResultBar, DoMe, useAiResult } from "./shared.jsx";
 
 
@@ -34,8 +35,14 @@ function DraftRoom({ cfg, board, setBoard }) {
     ai.begin(); setAdvErr("");
     const available = PLAYERS.filter((p) => !board[p.id]).slice(0, 24).map((p) => `${p.name} (${p.pos}, ADP ${p.adp})`).join("; ");
     const roster = mine.map((p) => `${p.name} (${p.pos})`).join(", ") || "none yet";
-    const sys = "You are a sharp fantasy football draft advisor for a 12-team PPR league. Be concise and specific: recommend the single best pick and one or two alternates, each with a one-line reason. Favor RB scarcity and PPR pass-catchers. 4 sentences max.";
-    const user = `My draft slot: ${cfg.slot || "unknown"}. Format: ${cfg.format}. My roster so far: ${roster}. Best available (by ADP): ${available}. Question: ${advQ || "Who should I take next?"}`;
+    const sys = [
+      "You are a sharp fantasy football draft advisor for a "
+        + (cfg.teams || 12) + "-team " + (cfg.scoring || "PPR") + " league (" + (cfg.format || "Standard") + ").",
+      strategyForDraft(),
+      "Be concise and specific: recommend the single best pick and one or two alternates, each with a one-line strategic reason.",
+      "Prefer scarcity and expected value over name recognition. 4 sentences max.",
+    ].join(" ");
+    const user = `My draft slot: ${cfg.slot || "unknown"}. Format: ${cfg.format}. Scoring: ${cfg.scoring}. Teams: ${cfg.teams}. My roster so far: ${roster}. Best available (by ADP): ${available}. Question: ${advQ || "Who should I take next?"}`;
     try {
       const out = await callClaude([{ role: "user", content: user }], { system: sys, model: MODEL_FAST, max_tokens: 500 });
       await ai.succeed(out || "No response.");

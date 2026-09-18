@@ -9,6 +9,7 @@ import {
   slotEligible,
   FALLBACK_NOTE,
 } from "./lineup.js";
+import { strategyForWeeklyPlan } from "./strategy.js";
 import { getMyStarters, getNflPlayers, sleeperPlayerDisplayName } from "../sleeper.js";
 
 const PLAN_KIND = "plan:week";
@@ -173,22 +174,26 @@ export async function buildWeeklyPlan({
   const sys = [
     "You are a fantasy football co-manager for a " + (cfg.teams || 12) + "-team "
       + (cfg.scoring || "PPR") + " league (" + (cfg.format || "Standard") + ").",
+    strategyForWeeklyPlan(),
     "Use live news if web_search is available. Give ONE complete weekly plan.",
     "Slots in order: " + (slots || []).join(", ") + ".",
     "FLEX = RB/WR/TE only (never K or DEF). SUPERFLEX = QB/RB/WR/TE. K only in K. DEF only in DEF.",
-    "Use ONLY players from my roster. Each player at most once.",
+    "Use ONLY players from my roster for lineup. Each player at most once. Never invent invalid starts.",
+    "MATCHUP ORDER (mandatory): (1) Estimate the opponent's best valid lineup for these same slots from their roster. (2) Name their weakest spots vs your edge. (3) Then set MY lineup, swaps, waiverTargets, and block to beat that projection and deny them cheap fills where it matters. (4) Set winProb and matchup.read from that head-to-head — attack their soft spots explicitly.",
+    "Tone for lineup/matchup/swaps/waiver/block 'why': short, blunt, directive (e.g. Start him — their run defense is gutted).",
+    "Home-facing toDo.verdict: still blunt and confident, but beginner-readable — full words, no abbreviations or jargon (no VORP, SOS, FAAB %, air yards).",
     "Respond with ONLY JSON, no prose:",
     JSON.stringify({
       deadline: "e.g. Lineup locks Sun 1pm ET",
-      lineup: [{ slot: "", player: "exact roster name", why: "one line" }],
+      lineup: [{ slot: "", player: "exact roster name", why: "one blunt line" }],
       toDo: [{ type: "lineup|waiver|drop|trade|none", priority: 1, verdict: "plain imperative", why: "", copy: "" }],
       matchup: {
         winProb: "e.g. 55%",
         margin: "e.g. +3.2",
-        read: "edges vs this opponent",
+        read: "how we beat THEIR projected lineup / soft spots",
         swaps: [{ out: "", in: "", why: "" }],
         waiverTargets: [{ player: "", pos: "", why: "" }],
-        block: [{ player: "", why: "" }],
+        block: [{ player: "", why: "deny them" }],
       },
       allSet: false,
     }),

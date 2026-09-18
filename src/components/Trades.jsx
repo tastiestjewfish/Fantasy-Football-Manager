@@ -1,6 +1,7 @@
 import React, { useState } from "react";
 import { activeRoster, rosterNeeds } from "../lib/lineup.js";
-import { callClaude, callClaudeSearch, advisorError, extractJSON, MODEL_FAST, clipForAi } from "../lib/ai.js";
+import { callClaudeSearch, advisorError, extractJSON } from "../lib/ai.js";
+import { strategyForTrades } from "../lib/strategy.js";
 import { copyText } from "../lib/format.js";
 import { AiResultBar, DoMe, Tier, useAiResult } from "./shared.jsx";
 
@@ -26,8 +27,17 @@ function Trades({ cfg, board, members, offers, setOffers, goLeague }) {
     aiFind.begin(); setErrF("");
     const target = members.find((m) => m.name === targetName);
     const targetStr = target ? `${target.teamName} (${target.name}) — notes on their roster: ${target.notes || "unknown; infer from a typical roster"}` : "any league team (pick whichever fit is best)";
-    const sys = "You are a top-tier fantasy football trade strategist for a 12-team PPR league. If web_search is available, use it to check CURRENT player value, role, and injury news before valuing anyone. Propose realistic trades I could send. For EACH idea give two framings: a 'gentlemans' offer (fair, likely accepted, still net-positive for me) and an 'aggressive' offer (maximum return for me, lower acceptance odds). Respond with ONLY JSON, no prose: {\"ideas\":[{\"theme\":\"short label\",\"rationale\":\"why it fits both teams' needs\",\"gentlemans\":{\"give\":[\"player\"],\"get\":[\"player\"],\"why\":\"one line\",\"acceptOdds\":\"high|medium|low\"},\"aggressive\":{\"give\":[\"player\"],\"get\":[\"player\"],\"why\":\"one line\",\"acceptOdds\":\"high|medium|low\"}}]}. 2-3 ideas.";
-    const user = `My roster: ${myList}. My needs: ${need.join(", ") || "balanced"}. My surplus: ${surplus.join(", ") || "none"}. Trade target: ${targetStr}. Format: ${cfg.format}.`;
+    const sys = [
+      "You are a top-tier fantasy football trade strategist for a "
+        + (cfg.teams || 12) + "-team " + (cfg.scoring || "PPR") + " league (" + (cfg.format || "Standard") + ").",
+      strategyForTrades(),
+      "If web_search is available, use it to check CURRENT player value, role, and injury news before valuing anyone.",
+      "Propose realistic trades I could send. For EACH idea give two framings: a 'gentlemans' offer (fair, likely accepted, still net-positive for me) and an 'aggressive' offer (maximum return for me, lower acceptance odds).",
+      "Every why/rationale must reflect strategic reasoning (VORP, buy-low/sell-high, roster fit) in plain language — not name recognition.",
+      "Respond with ONLY JSON, no prose:",
+      "{\"ideas\":[{\"theme\":\"short label\",\"rationale\":\"why it fits both teams' needs\",\"gentlemans\":{\"give\":[\"player\"],\"get\":[\"player\"],\"why\":\"one line\",\"acceptOdds\":\"high|medium|low\"},\"aggressive\":{\"give\":[\"player\"],\"get\":[\"player\"],\"why\":\"one line\",\"acceptOdds\":\"high|medium|low\"}}]}. 2-3 ideas.",
+    ].join(" ");
+    const user = `My roster: ${myList}. My needs: ${need.join(", ") || "balanced"}. My surplus: ${surplus.join(", ") || "none"}. Trade target: ${targetStr}. Format: ${cfg.format}. Scoring: ${cfg.scoring}. Teams: ${cfg.teams}.`;
     try {
       const j = extractJSON(await callClaudeSearch([{ role: "user", content: user }], { system: sys }));
       await aiFind.succeed(j.ideas || []);
@@ -40,8 +50,17 @@ function Trades({ cfg, board, members, offers, setOffers, goLeague }) {
   const runRespond = async () => {
     const hadPrior = resp != null;
     aiResp.begin(); setErrR("");
-    const sys = "You are a top-tier fantasy football trade strategist for a 12-team PPR league. If web_search is available, use it for CURRENT values, roles, and injuries. Evaluate the incoming offer from MY perspective and return a verdict plus two counter-offers. Respond with ONLY JSON, no prose: {\"verdict\":\"accept|decline|counter\",\"read\":\"plainly, who wins and by how much\",\"gentlemans\":{\"counter\":\"give X, get Y\",\"why\":\"one line\",\"acceptOdds\":\"high|medium|low\",\"message\":\"a friendly message I can send them\"},\"aggressive\":{\"counter\":\"give X, get Y\",\"why\":\"one line\",\"acceptOdds\":\"high|medium|low\",\"message\":\"a firm message I can send them\"}}.";
-    const user = `My roster: ${myList}. Incoming offer — they GIVE me: ${offGive || "(nothing entered)"}; they WANT from me: ${offWant || "(nothing entered)"}. Format: ${cfg.format}.`;
+    const sys = [
+      "You are a top-tier fantasy football trade strategist for a "
+        + (cfg.teams || 12) + "-team " + (cfg.scoring || "PPR") + " league (" + (cfg.format || "Standard") + ").",
+      strategyForTrades(),
+      "If web_search is available, use it for CURRENT values, roles, and injuries.",
+      "Evaluate the incoming offer from MY perspective and return a verdict plus two counter-offers.",
+      "Every why/read must use strategic reasoning in plain language — prefer EV and roster fit over brand names.",
+      "Respond with ONLY JSON, no prose:",
+      "{\"verdict\":\"accept|decline|counter\",\"read\":\"plainly, who wins and by how much\",\"gentlemans\":{\"counter\":\"give X, get Y\",\"why\":\"one line\",\"acceptOdds\":\"high|medium|low\",\"message\":\"a friendly message I can send them\"},\"aggressive\":{\"counter\":\"give X, get Y\",\"why\":\"one line\",\"acceptOdds\":\"high|medium|low\",\"message\":\"a firm message I can send them\"}}.",
+    ].join(" ");
+    const user = `My roster: ${myList}. Incoming offer — they GIVE me: ${offGive || "(nothing entered)"}; they WANT from me: ${offWant || "(nothing entered)"}. Format: ${cfg.format}. Scoring: ${cfg.scoring}. Teams: ${cfg.teams}.`;
     try {
       await aiResp.succeed(extractJSON(await callClaudeSearch([{ role: "user", content: user }], { system: sys })));
     } catch (e) {

@@ -15,7 +15,7 @@ import {
   loadLeagueBundle, writeLeagueBundle, draftToolsVisible,
   importSleeper, mergeImportedMembers,
 } from "./lib/league.js";
-import { ensureWeeklyPlan } from "./lib/weeklyPlan.js";
+import { ensureWeeklyPlan } from "./lib/weeklyplan.js";
 
 import { SpearMark, LeaguePicker, AddLeague } from "./components/shared.jsx";
 import ErrorBoundary from "./components/ErrorBoundary.jsx";
