@@ -5,7 +5,7 @@
  */
 const path = require("path");
 const express = require("express");
-const { app: apiApp } = require("./functions/app");
+const { app: apiApp } = require("./api/app");
 
 const PORT = Number(process.env.PORT) || 8080;
 const HOST = "0.0.0.0";

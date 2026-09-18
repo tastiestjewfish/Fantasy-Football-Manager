@@ -122,6 +122,30 @@
   letter-spacing:.06em;text-transform:uppercase;padding:8px 0 0;display:inline-flex;align-items:center;gap:6px}
 .coachwhybtn:hover{color:var(--ink)}
 .coachwhy{margin-top:8px;font-size:13px;color:var(--muted);line-height:1.55}
+.homestatus{font-size:15px;font-weight:700;line-height:1.4;color:var(--ink)}
+.homebanner{margin-top:16px;padding:12px 14px;border-radius:12px;font-weight:800;font-size:14px;line-height:1.4;
+  color:var(--brandInk);background:linear-gradient(180deg,rgba(206,184,136,.95),var(--gold));
+  border:1px solid rgba(206,184,136,.55);box-shadow:inset 0 1px 0 rgba(255,255,255,.18)}
+.hometodorow{display:flex;justify-content:space-between;align-items:center;gap:10px}
+.homenum{font-size:12px;font-weight:800;color:var(--muted2);letter-spacing:.06em}
+.homedone{display:inline-flex;align-items:center;gap:8px;font-size:12px;font-weight:700;color:var(--muted);cursor:pointer}
+.homedone.homewarn{color:var(--now);cursor:default}
+.homedone input{accent-color:var(--go);width:16px;height:16px}
+.homedone-card{opacity:.55}
+.homedone-card .v{text-decoration:line-through}
+.howto{margin:12px 0 0;padding-left:18px;color:var(--muted);font-size:13px;line-height:1.55}
+.howto li{margin:4px 0}
+.homeallset{margin-top:4px}
+.hometools{display:block;margin:20px auto 8px;background:transparent;border:0;color:var(--muted2);
+  font-size:12px;font-weight:700;letter-spacing:.04em;cursor:pointer;padding:6px 8px}
+.hometools:hover{color:var(--muted)}
+.nav .navtools{background:transparent;border:0;color:rgba(247,240,228,.55);font-weight:700;font-size:12px;
+  padding:8px 10px;border-radius:9px;letter-spacing:.02em;white-space:nowrap}
+.nav .navtools:hover,.nav .navtools.on{color:rgba(247,240,228,.85)}
+
+.airesbar{margin:10px 0 4px}
+.airesrow{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap}
+.airesdim{opacity:.55;transition:opacity .15s ease}
 
 /* buttons */
 .btn{background:linear-gradient(180deg,var(--goldBright),var(--gold));color:var(--brandInk);border:0;
@@ -274,12 +298,26 @@
 .slotchip{display:inline-flex;align-items:center;gap:5px;background:var(--panel2);border:1px solid var(--line);border-radius:7px;padding:5px 8px;font-size:12px;font-weight:700;margin:0 5px 5px 0}
 .slotchip button{background:none;border:0;color:var(--muted);cursor:pointer;font-size:12px;padding:0}
 .slotedit select{background:var(--panel2);color:var(--ink);border:1px solid var(--line);border-radius:8px;padding:7px 9px;font-size:13px}
+.lcomptable{margin-top:10px;border:1px solid var(--line);border-radius:12px;overflow:hidden}
+.lcomphead,.lcomprow{display:grid;grid-template-columns:72px 1fr 1.2fr;gap:10px;align-items:start;padding:10px 12px}
+.lcomphead{background:var(--panel2);font-size:11px;font-weight:800;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
+.lcomprow{border-top:1px solid var(--line)}
+.lcomprow.lcompchange{background:rgba(206,184,136,.10)}
+.lslot{font-size:11px;font-weight:800;letter-spacing:.05em;color:var(--muted);text-transform:uppercase;padding-top:2px}
+.lcompcur{font-size:14px;font-weight:600;line-height:1.35;min-width:0}
+.lcompsug{font-size:14px;line-height:1.35;min-width:0}
+.lcompkeep{color:var(--muted);font-weight:700}
+.lcompstart{color:var(--gold);font-weight:800}
+.lwhy{font-size:12px;color:var(--muted);margin-top:4px;line-height:1.45}
 .lrow{display:flex;align-items:center;gap:10px;padding:9px 0;border-top:1px solid var(--line)}
 .lrow:first-child{border-top:0}
-.lslot{font-size:11px;font-weight:800;letter-spacing:.05em;color:var(--muted);min-width:74px;text-transform:uppercase}
+.lrow .lslot{min-width:74px}
 .lrow select{width:100%;background:var(--panel2);color:var(--ink);border:1px solid var(--line);border-radius:8px;padding:9px 10px;font-size:14px}
-.lwhy{font-size:12px;color:var(--muted);margin-top:4px;line-height:1.45}
 .lproj{font-family:var(--mono);font-size:13px;color:var(--go);min-width:42px;text-align:right;font-weight:600}
+@media(max-width:560px){
+  .lcomphead,.lcomprow{grid-template-columns:56px 1fr;gap:6px 10px}
+  .lcompsug{grid-column:2}
+}
 
 /* login gate */
 .gate{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px;

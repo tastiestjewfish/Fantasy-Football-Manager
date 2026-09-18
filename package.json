@@ -6,12 +6,12 @@
   "scripts": {
     "dev": "concurrently -k \"npm run dev:api\" \"npm run dev:web\"",
     "dev:web": "vite",
-    "dev:api": "node functions/index.js",
+    "dev:api": "node api/app.js",
     "build": "vite build",
     "lint": "oxlint",
     "preview": "vite preview",
     "start": "node apphosting-server.js",
-    "start:api": "node functions/index.js"
+    "start:api": "node api/app.js"
   },
   "engines": {
     "node": ">=18"

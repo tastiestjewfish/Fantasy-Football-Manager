@@ -3,21 +3,6 @@
     "rules": "firestore.rules",
     "indexes": "firestore.indexes.json"
   },
-  "functions": [
-    {
-      "source": "functions",
-      "codebase": "default",
-      "runtime": "nodejs20",
-      "ignore": [
-        "node_modules",
-        ".git",
-        "firebase-debug.log",
-        "firebase-debug.*.log",
-        "*.local",
-        ".env.example"
-      ]
-    }
-  ],
   "hosting": {
     "site": "fantasy-football-manager-210cc",
     "public": "dist",
@@ -47,13 +32,6 @@
       }
     ],
     "rewrites": [
-      {
-        "source": "/api/**",
-        "function": {
-          "functionId": "hqlive",
-          "region": "us-central1"
-        }
-      },
       {
         "source": "**",
         "destination": "/index.html"

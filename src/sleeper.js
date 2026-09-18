@@ -141,3 +141,22 @@ export async function sleeperNextOpponentDirect(leagueId, myRosterId) {
   const opp = matchups.find((m) => m.matchup_id === mine.matchup_id && m.roster_id !== rosterId);
   return { ...clock, oppRosterId: opp ? opp.roster_id : null };
 }
+
+/** Current week's starting player_ids for a roster, or null if Sleeper is unreachable. */
+export async function getMyStarters(leagueId, myRosterId) {
+  try {
+    const id = String(leagueId || "").trim();
+    const rosterId = Number(myRosterId);
+    if (!id || !Number.isFinite(rosterId)) return null;
+    const clock = await nflSeasonClock();
+    const week = clock && clock.week;
+    if (week == null) return null;
+    const matchups = await sleeperJson(`/league/${encodeURIComponent(id)}/matchups/${week}`);
+    if (!Array.isArray(matchups)) return null;
+    const mine = matchups.find((m) => Number(m.roster_id) === rosterId);
+    if (!mine || !Array.isArray(mine.starters)) return null;
+    return mine.starters.map((pid) => String(pid));
+  } catch {
+    return null;
+  }
+}

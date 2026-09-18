@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef, useCallback } from "react";
 import storage from "./storage";
 import { getWorkspaceId } from "./firebase";
 import { apiFetch, apiJson, errText, errFromApiBody } from "./api";
-import { importSleeperLeague, sleeperNextOpponentDirect, nflSeasonClock, getNflPlayers } from "./sleeper";
+import { importSleeperLeague, sleeperNextOpponentDirect, nflSeasonClock, getNflPlayers, getMyStarters } from "./sleeper";
 import { connectGmail, fetchGmailMessages, hasGmailToken, isWinningIntel, messagesToDump, triageLocal } from "./gmail";
 
 /* =========================================================================
@@ -10,7 +10,7 @@ import { connectGmail, fetchGmailMessages, hasGmailToken, isWinningIntel, messag
    A shared command center for two co-managers. Core job: never miss a move.
    - Draft Room (2026 PPR board + AI advisor)
    - Inbox Scan (Gmail or pasted mail, flags urgent action items)
-   - Reminders (live countdowns + calendar export so real alerts fire)
+   - Reminders (calendar export so real alerts fire on your phone)
    Data is saved to SHARED storage so both managers see the same thing.
    ========================================================================= */
 
@@ -89,6 +89,109 @@ async function loadKey(key, fallback, shared = true) {
 }
 async function saveKey(key, value, shared = true) {
   try { await storage.set(key, JSON.stringify(value), shared); } catch {}
+}
+
+/* ---------- Persistent AI results (per-user; never TTL-expire) ---------- */
+const AI_RESULT_KEYS = [
+  "ai:home", "ai:lineup", "ai:startsit", "ai:waivers", "ai:trades",
+  "ai:respond", "ai:build", "ai:matchup", "ai:draft",
+];
+const aiResultBoot = Object.create(null);
+
+function fmtGeneratedAt(ms) {
+  if (ms == null || !Number.isFinite(Number(ms))) return "";
+  const d = new Date(Number(ms));
+  if (Number.isNaN(d.getTime())) return "";
+  return d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+}
+
+async function loadAiResult(key) {
+  const rec = await loadKey(key, null, false);
+  if (!rec || typeof rec !== "object" || rec.data === undefined || rec.data === null) return null;
+  return { data: rec.data, at: rec.at || 0 };
+}
+
+async function saveAiResult(key, data) {
+  const at = Date.now();
+  await saveKey(key, { data, at }, false);
+  return at;
+}
+
+async function preloadAiResults() {
+  await Promise.all(AI_RESULT_KEYS.map(async (key) => {
+    try { aiResultBoot[key] = await loadAiResult(key); }
+    catch { aiResultBoot[key] = null; }
+  }));
+}
+
+function AiResultBar({ at, busy, refreshFail, onRefresh, show }) {
+  if (!show && !at && !busy && !refreshFail) return null;
+  return (
+    <div className="airesbar">
+      <div className="airesrow">
+        {at ? <span className="eyebrow" style={{ margin: 0 }}>Generated {fmtGeneratedAt(at)}</span> : <span />}
+        {onRefresh && (
+          <button type="button" className="btn ghost sm" onClick={onRefresh} disabled={busy}>
+            {busy ? "Refreshing…" : "↻ Refresh"}
+          </button>
+        )}
+      </div>
+      {refreshFail && at ? (
+        <div className="note" style={{ borderColor: "var(--soon)", marginTop: 8 }}>
+          Couldn't refresh — showing last result from {fmtGeneratedAt(at)}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function useAiResult(storageKey) {
+  const boot = aiResultBoot[storageKey];
+  const [data, setData] = useState(() => (boot && boot.data !== undefined && boot.data !== null ? boot.data : null));
+  const [at, setAt] = useState(() => (boot && boot.at) || null);
+  const [busy, setBusy] = useState(false);
+  const [hydrated, setHydrated] = useState(storageKey in aiResultBoot);
+  const [refreshFail, setRefreshFail] = useState(false);
+  const dataRef = useRef(data);
+  dataRef.current = data;
+
+  useEffect(() => {
+    let cancelled = false;
+    loadAiResult(storageKey).then((rec) => {
+      if (cancelled) return;
+      if (rec) {
+        setData(rec.data);
+        setAt(rec.at);
+        aiResultBoot[storageKey] = rec;
+      }
+      setHydrated(true);
+    });
+    return () => { cancelled = true; };
+  }, [storageKey]);
+
+  const begin = useCallback(() => {
+    setBusy(true);
+    setRefreshFail(false);
+  }, []);
+
+  const succeed = useCallback(async (next) => {
+    const ts = await saveAiResult(storageKey, next);
+    setData(next);
+    setAt(ts);
+    aiResultBoot[storageKey] = { data: next, at: ts };
+    setBusy(false);
+    setRefreshFail(false);
+    return ts;
+  }, [storageKey]);
+
+  const failKeep = useCallback(() => {
+    setBusy(false);
+    if (dataRef.current != null) setRefreshFail(true);
+  }, []);
+
+  const end = useCallback(() => { setBusy(false); }, []);
+
+  return { data, at, busy, hydrated, refreshFail, begin, succeed, failKeep, end };
 }
 
 /* ---------- multi-league storage (legacy keys stay readable for the first league) ---------- */
@@ -395,22 +498,6 @@ function extractJSON(text) {
   }
 }
 
-/* ---------- phone alerts: popup + vibration + system notification ---------- */
-function canNotify() { return typeof Notification !== "undefined"; }
-async function askNotify() {
-  if (!canNotify()) return "unsupported";
-  try { return await Notification.requestPermission(); } catch { return "denied"; }
-}
-function buzz(pattern) {
-  try { if (typeof navigator !== "undefined" && navigator.vibrate) navigator.vibrate(pattern || [120, 60, 120]); } catch {}
-}
-function pushNote(title, body) {
-  try {
-    if (canNotify() && Notification.permission === "granted") { new Notification(title, { body }); return true; }
-  } catch {}
-  return false;
-}
-
 /* ---------- weekly advice: Sonnet + optional web search ---------- */
 async function callClaudeSearch(messages, extra = {}) {
   const opts = { model: MODEL_SMART, max_tokens: 2000, ...extra };
@@ -605,8 +692,9 @@ function localRoster(cfg, fullSlots) {
 
 /* ========================================================================= */
 export default function LeagueHQ({ user, onSignOut }) {
-  const [tab, setTab] = useState("coach");
+  const [tab, setTab] = useState("home");
   const [panes, setPanes] = useState({ week: "lineup", moves: "trades", league: "teams", draft: "board" });
+  const [toolsOpen, setToolsOpen] = useState(false);
   const [ready, setReady] = useState(false);
 
   const [cfg, setCfg] = useState(DEFAULT_CFG);
@@ -614,10 +702,6 @@ export default function LeagueHQ({ user, onSignOut }) {
   const [rem, setRem] = useState(DEFAULT_REM);
   const [alerts, setAlerts] = useState([]);          // from last inbox scan
   const [, force] = useState(0);
-  const [toast, setToast] = useState(null);
-  const [alertsOn, setAlertsOn] = useState(false);
-  const [notifPerm, setNotifPerm] = useState(typeof Notification !== "undefined" ? Notification.permission : "unsupported");
-  const firedRef = useRef({});
   const [sources, setSources] = useState(defaultSources("Sleeper"));
   const [onboarded, setOnboarded] = useState(false);
   const [members, setMembers] = useState([]);
@@ -691,6 +775,7 @@ export default function LeagueHQ({ user, onSignOut }) {
       setOnboarded(await loadKey("me:onboarded", false, false));
       await loadAnthropicWorkspaceId();
       await loadUseWebSearch();
+      await preloadAiResults();
       if (!cancelled) setReady(true);
       await refreshSleeper(bundle.cfg, bundle.members, nextId);
     })();
@@ -748,7 +833,7 @@ export default function LeagueHQ({ user, onSignOut }) {
     saveKey("me:activeLeagueId", id, false);
     switchingRef.current = false;
     setRefreshing(false);
-    if (tab === "draft" && !draftToolsVisible(bundle.cfg, bundle.members, clock)) setTab("coach");
+    if (tab === "draft" && !draftToolsVisible(bundle.cfg, bundle.members, clock)) setTab("home");
     await refreshSleeper(bundle.cfg, bundle.members, id);
   };
 
@@ -775,39 +860,6 @@ export default function LeagueHQ({ user, onSignOut }) {
     if (id === activeIdRef.current) await switchLeague(nextIndex[0].id);
   };
 
-  /* phone alert engine */
-  const fireAlert = useCallback((title, body, opts = {}) => {
-    setToast({ title, body });
-    buzz(opts.pattern);
-    pushNote(title, body);
-  }, []);
-  const enableAlerts = async () => {
-    const p = await askNotify();
-    setNotifPerm(p);
-    setAlertsOn(true);
-    fireAlert("Alerts on", "You'll get a popup and a buzz before deadlines while the app is open.", { pattern: [80, 40, 80] });
-  };
-  const testAlert = () => fireAlert("Test alert · League HQ", "If your phone buzzed and this popped up, alerts are working.", { pattern: [200, 80, 200, 80, 200] });
-
-  useEffect(() => {
-    if (!alertsOn) return;
-    const check = () => {
-      computeDeadlines(rem).forEach((d) => {
-        const sec = Math.floor((d.when - new Date()) / 1000);
-        const k3 = d.key + d.when.getTime() + "h3", k0 = d.key + d.when.getTime() + "z";
-        if (sec <= 0 && sec > -90 && !firedRef.current[k0]) {
-          firedRef.current[k0] = 1;
-          fireAlert(d.label + " — now", "This deadline is here. Open League HQ and lock it in.", { pattern: [200, 80, 200, 80, 200] });
-        } else if (sec <= 10800 && sec > 0 && !firedRef.current[k3]) {
-          firedRef.current[k3] = 1;
-          fireAlert(d.label + " soon", "Under 3 hours left (" + fmtCountdown(d.when) + "). Get it done.", { pattern: [120, 60, 120] });
-        }
-      });
-    };
-    const t = setInterval(check, 1000);
-    return () => clearInterval(t);
-  }, [alertsOn, rem, fireAlert]);
-
   /* deadlines */
   const deadlines = computeDeadlines(rem);
   const nextDeadline = deadlines[0];
@@ -815,7 +867,6 @@ export default function LeagueHQ({ user, onSignOut }) {
 
   const showDraft = draftToolsVisible(cfg, members, clock);
   const TABS = [
-    { id: "coach", label: "Coach" },
     { id: "home", label: "Home" },
     { id: "week", label: "This week", panes: [["lineup", "Lineup"], ["matchup", "Matchup"], ["start", "Start / Sit"]] },
     { id: "moves", label: "Moves", panes: [["trades", "Trades"], ["waiver", "Waivers"], ["byes", "Byes"]] },
@@ -823,14 +874,28 @@ export default function LeagueHQ({ user, onSignOut }) {
     showDraft ? { id: "draft", label: "Draft", panes: [["board", "Board"], ["build", "Builder"]] } : null,
     { id: "settings", label: "Settings" },
   ].filter(Boolean);
-  const tabShown = (tab === "draft" && !showDraft) ? "coach" : tab;
+  const TOOL_TAB_IDS = { week: 1, moves: 1, league: 1, draft: 1 };
+  const tabShown = (tab === "draft" && !showDraft) || tab === "coach" ? "home" : tab;
   const pane = panes[tabShown];
   const setPane = (id) => setPanes((s) => ({ ...s, [tabShown]: id }));
   const go = (nextTab, nextPane) => {
     setTab(nextTab);
+    if (TOOL_TAB_IDS[nextTab]) setToolsOpen(true);
     if (nextPane) setPanes((s) => ({ ...s, [nextTab]: nextPane }));
   };
   const activeTab = TABS.find((t) => t.id === tabShown);
+  const primaryTabs = TABS.filter((t) => t.id === "home" || t.id === "settings");
+  const toolTabs = TABS.filter((t) => TOOL_TAB_IDS[t.id]);
+  const navTabs = toolsOpen
+    ? [...primaryTabs.filter((t) => t.id === "home"), ...toolTabs, ...primaryTabs.filter((t) => t.id === "settings")]
+    : primaryTabs;
+
+  const toggleTools = () => {
+    setToolsOpen((open) => {
+      if (open && TOOL_TAB_IDS[tabShown]) setTab("home");
+      return !open;
+    });
+  };
 
   if (!ready) {
     return (<div className="hq"><div className="wrap" style={{ paddingTop: 60, color: "var(--muted)" }}>Loading League HQ…</div></div>);
@@ -868,7 +933,7 @@ export default function LeagueHQ({ user, onSignOut }) {
         </div>
         <div className="topin" style={{ paddingTop: 0 }}>
           <nav className="nav">
-            {TABS.map((t) => (
+            {navTabs.map((t) => (
               <button key={t.id} className={tabShown === t.id ? "on" : ""} onClick={() => setTab(t.id)}>
                 {t.id === "home" && nextDeadline && (
                   <span className="dot" style={{ background: `var(--${heroState})` }} />
@@ -876,12 +941,20 @@ export default function LeagueHQ({ user, onSignOut }) {
                 {t.label}
               </button>
             ))}
+            <button
+              type="button"
+              className={"navtools" + (toolsOpen ? " on" : "")}
+              onClick={toggleTools}
+              aria-expanded={toolsOpen}
+            >
+              Tools {toolsOpen ? "▾" : "▸"}
+            </button>
           </nav>
         </div>
       </header>
 
       <main className="wrap">
-        {(tabShown === "coach" || tabShown === "home" || tabShown === "week") && clock && (
+        {(tabShown === "home" || tabShown === "week") && clock && (
           <div className="weekbanner">{clock.label}</div>
         )}
         {activeTab && activeTab.panes && (
@@ -891,18 +964,18 @@ export default function LeagueHQ({ user, onSignOut }) {
             ))}
           </div>
         )}
-        {tabShown === "coach" && onboarded && (
-          <Coach cfg={cfg} board={board} members={members} slots={slots} go={go} nextDeadline={nextDeadline} clock={clock} aiStoreKey={lk(activeId, "coach")} />
-        )}
         {tabShown === "home" && (
-          <Dashboard
-            heroState={heroState}
+          <Home
+            cfg={cfg}
+            board={board}
+            members={members}
+            slots={slots}
             nextDeadline={nextDeadline}
-            deadlines={deadlines}
-            alerts={alerts}
-            goInbox={() => go("league", "inbox")}
-            goSettings={() => go("settings")}
-            goFixWeek={() => go("week", "lineup")}
+            clock={clock}
+            lastRefresh={lastRefresh}
+            go={go}
+            onStartSetup={restartOnboarding}
+            onOpenTools={() => setToolsOpen(true)}
           />
         )}
         {tabShown === "week" && pane === "lineup" && (
@@ -937,8 +1010,7 @@ export default function LeagueHQ({ user, onSignOut }) {
         )}
         {tabShown === "settings" && (
           <>
-            <Reminders rem={rem} setRem={persistRem} deadlines={deadlines} cfg={cfg}
-              alertsOn={alertsOn} notifPerm={notifPerm} enableAlerts={enableAlerts} testAlert={testAlert} />
+            <Reminders rem={rem} setRem={persistRem} cfg={cfg} />
             <div style={{ height: 14 }} />
             <Setup
               cfg={cfg}
@@ -955,7 +1027,6 @@ export default function LeagueHQ({ user, onSignOut }) {
         )}
       </main>
 
-      {toast && <Toast toast={toast} onClose={() => setToast(null)} />}
       {!onboarded && (
         <Onboarding
           cfg={cfg}
@@ -964,7 +1035,7 @@ export default function LeagueHQ({ user, onSignOut }) {
           setMembers={persistMembers}
           setSlots={persistSlots}
           onDone={completeOnboarding}
-          goCoach={() => setTab("coach")}
+          goHome={() => setTab("home")}
         />
       )}
       {addingLeague && (
@@ -1095,7 +1166,7 @@ function AddLeague({ onCancel, onSave }) {
 }
 
 /* ---------- Onboarding (first run) ---------- */
-function Onboarding({ cfg, setCfg, members, setMembers, setSlots, onDone, goCoach }) {
+function Onboarding({ cfg, setCfg, members, setMembers, setSlots, onDone, goHome }) {
   const [step, setStep] = useState(0);
   const [platform, setPlatform] = useState(cfg.platform || "Sleeper");
   const [leagueId, setLeagueId] = useState(cfg.leagueId || "");
@@ -1141,7 +1212,7 @@ function Onboarding({ cfg, setCfg, members, setMembers, setSlots, onDone, goCoac
 
   const finish = () => {
     onDone();
-    goCoach();
+    goHome();
   };
 
   const canNext = step !== 3 || !hasTeams || hasMine;
@@ -1156,7 +1227,7 @@ function Onboarding({ cfg, setCfg, members, setMembers, setSlots, onDone, goCoac
           <>
             <h2 id="ob-title">Welcome to League HQ</h2>
             <div className="lead">Three quick steps and your team runs itself.</div>
-            <div className="note">After this, the <b>Coach</b> screen can build a weekly action list when you ask.</div>
+            <div className="note">After this, <b>Home</b> tells you what to do each week — tap nothing, just follow the list.</div>
           </>
         )}
 
@@ -1172,7 +1243,7 @@ function Onboarding({ cfg, setCfg, members, setMembers, setSlots, onDone, goCoac
         {step === 2 && (
           <>
             <h2 id="ob-title">Connect your league</h2>
-            <div className="lead">Import this first league so Coach knows your team. You can add others from the header afterward.</div>
+            <div className="lead">Import this first league so we know your team. You can add others from the header afterward.</div>
             <div className="obf">
               <label>Platform</label>
               <select value={platform} onChange={(e) => { setPlatform(e.target.value); set({ platform: e.target.value }); }}>
@@ -1200,7 +1271,7 @@ function Onboarding({ cfg, setCfg, members, setMembers, setSlots, onDone, goCoac
           <>
             <h2 id="ob-title">Pick your team</h2>
             {importOk && msg && <div className="note" style={{ borderColor: "var(--go)" }}>{msg}</div>}
-            <div className="note">This is the step everyone forgets — the Coach needs to know which team is yours.</div>
+            <div className="note">This is the step everyone forgets — we need to know which team is yours.</div>
             {hasTeams ? (
               <div style={{ marginTop: 12 }}>
                 {(members || []).map((m, i) => (
@@ -1247,7 +1318,7 @@ function Onboarding({ cfg, setCfg, members, setMembers, setSlots, onDone, goCoac
         {step === 5 && (
           <>
             <h2 id="ob-title">You're set</h2>
-            <div className="lead">From now on, just open the app — the Coach tells you what to do.</div>
+            <div className="lead">From now on, just open the app — Home tells you what to do.</div>
           </>
         )}
 
@@ -1255,242 +1326,419 @@ function Onboarding({ cfg, setCfg, members, setMembers, setSlots, onDone, goCoac
           {step > 0 ? <button className="btn ghost" onClick={back}>Back</button> : <span />}
           {step < total - 1
             ? <button className="btn" onClick={next} disabled={!canNext}>Next</button>
-            : <button className="btn" onClick={finish}>Go to Coach</button>}
+            : <button className="btn" onClick={finish}>Go to Home</button>}
         </div>
       </div>
     </div>
   );
 }
 
-/* ---------- Toast popup ---------- */
-function Toast({ toast, onClose }) {
-  useEffect(() => { const t = setTimeout(onClose, 8000); return () => clearTimeout(t); }, [toast, onClose]);
-  return (
-    <div className="toast" role="alert">
-      <div style={{ width: 4, alignSelf: "stretch", background: "var(--now)", borderRadius: 3 }} />
-      <div style={{ minWidth: 0 }}>
-        <div className="ti">{toast.title}</div>
-        <div className="tb">{toast.body}</div>
-      </div>
-      <button className="tx" onClick={onClose} aria-label="Dismiss">×</button>
-    </div>
-  );
+/* ---------- Weekly advisor (Home to-do list) ---------- */
+const COACH_SYS = (teams, scoring, format) =>
+  "You are a friendly fantasy football helper for a beginner in a " + teams + "-team " + scoring + " league (" + format + "). Head-to-head. If web_search is available, use it for THIS WEEK's projections, injuries, inactives, and news. Using my roster, my next opponent, and brief notes on other teams, tell me EXACTLY what to do this week — a SHORT prioritized action list, most important first. Only include actions that need doing now; if nothing needs changing, set allSet true and actions []. Write like texting a friend who has never played fantasy. NEVER use abbreviations (no FLEX, WR, RB, TE, QB, PPR, ADP, FAAB) or jargon (no optimize, leverage, matchup edge, ceiling, floor). Spell out positions in full words if needed. For lineup advice, say exactly who to put in the starting lineup. For trades, name the manager and the exact offer. Respond with ONLY JSON, no prose: {\"deadline\":\"e.g. Lineup locks Sun 1:00pm ET\",\"allSet\":false,\"actions\":[{\"type\":\"lineup|trade|waiver|drop|none\",\"priority\":1,\"verdict\":\"plain imperative, e.g. Put Puka Nacua in your starting lineup\",\"why\":\"one or two beginner-friendly sentences\",\"copy\":\"optional text to copy, e.g. a trade message to send\"}]}";
+
+async function fetchCoachAdvice({ cfg, board, members, slots, nextDeadline }) {
+  const roster = activeRoster(members, board);
+  const opp = await resolveNextOpponent(cfg, members);
+  const others = (members || []).filter((m) => !m.mine).map((m) => {
+    const names = (m.roster || []).slice(0, 6).map((p) => p.name + " (" + p.pos + ")").join(", ");
+    const isOpp = opp && ((m.rosterId != null && m.rosterId === opp.rosterId) || m === opp);
+    return (m.teamName || m.name || "Team") + (isOpp ? " [opponent]" : "") + (names ? ": " + names : "");
+  }).join("\n");
+  const user = [
+    "My roster: " + (roster.map((p) => p.name + " (" + p.pos + ")").join(", ") || "not set") + ".",
+    "Opponent: " + (opp ? (opp.teamName || opp.name) : "unknown") + ". Opponent roster: " +
+      (opp && opp.roster && opp.roster.length ? opp.roster.map((p) => p.name + " (" + p.pos + ")").join(", ") : "unknown") + ".",
+    "My slots: " + (slots || []).join(", ") + ".",
+    "Scoring: " + cfg.scoring + ".",
+    others ? "Other teams (top names):\n" + others : "",
+  ].filter(Boolean).join("\n");
+  const j = extractJSON(await callClaudeSearch([{ role: "user", content: user }], { system: COACH_SYS(cfg.teams, cfg.scoring, cfg.format) }));
+  const actions = (Array.isArray(j.actions) ? j.actions : []).slice().sort((a, b) => (a.priority || 99) - (b.priority || 99));
+  return { deadline: j.deadline || (nextDeadline ? nextDeadline.label : ""), allSet: !!j.allSet, actions };
 }
 
-/* ---------- Coach (weekly action list) ---------- */
-const COACH_SYS = (teams, scoring, format) =>
-  "You are the user's fantasy football head coach for a " + teams + "-team " + scoring + " league (" + format + "). It is head-to-head. If web_search is available, use it for THIS WEEK's projections, injuries, inactives, and news. Using my roster, my next opponent, and brief notes on other teams, tell me EXACTLY what to do this week to win — a SHORT prioritized action list, most important first. Only include actions that need doing now; if my team is already optimal, say so. For lineup advice, be opponent-aware (protect the floor if I'm favored, chase ceiling if I'm the underdog). For trades, name the specific manager to target and the exact offer. Respond with ONLY JSON, no prose: {\"deadline\":\"e.g. Lineup locks Sun 1:00pm ET\",\"allSet\":false,\"actions\":[{\"type\":\"lineup|trade|waiver|drop|none\",\"priority\":1,\"verdict\":\"one imperative line, e.g. Start Puka over Waddle\",\"why\":\"2-3 sentences of reasoning\",\"copy\":\"optional text to copy, e.g. a trade message to send\"}]}";
+function coachActionKey(a) {
+  return [String(a.type || ""), String(a.verdict || "").trim()].join("|");
+}
 
-function Coach({ cfg, board, members, slots, go, nextDeadline, clock, aiStoreKey }) {
-  const [busy, setBusy] = useState(false);
-  const [hydrated, setHydrated] = useState(false);
+/** Best roster player named in a lineup recommendation (longest name match wins). */
+function lineupPlayerFromAction(action, roster) {
+  const text = [action && action.verdict, action && action.why].filter(Boolean).join(" ");
+  if (!text || !(roster || []).length) return null;
+  const lower = text.toLowerCase();
+  let best = null;
+  (roster || []).forEach((p) => {
+    const name = String(p && p.name || "").trim();
+    if (name.length < 3 || !lower.includes(name.toLowerCase())) return;
+    if (!best || name.length > best.name.length) best = p;
+  });
+  return best;
+}
+
+function isLineupAction(a) {
+  return String(a && a.type || "").toLowerCase() === "lineup";
+}
+
+function isActionDone(a, doneMap, lineupVerify) {
+  const key = coachActionKey(a);
+  if (isLineupAction(a) && lineupVerify && lineupVerify.results && lineupVerify.results[key]) {
+    return !!lineupVerify.results[key].starting;
+  }
+  return !!(doneMap && doneMap[key]);
+}
+
+function sleeperHowTo(type) {
+  const t = String(type || "").toLowerCase();
+  if (t === "lineup") {
+    return [
+      "Open the Sleeper app on your phone.",
+      "Tap your team, then open Lineup.",
+      "Make the change above, then tap to save.",
+    ];
+  }
+  if (t === "waiver" || t === "drop") {
+    return [
+      "Open the Sleeper app.",
+      "Go to Players (or Waivers).",
+      "Find the player, tap Claim or Drop, and confirm before the deadline.",
+    ];
+  }
+  return [
+    "Open the Sleeper app.",
+    "Find the screen that matches this task.",
+    "Make the change and confirm.",
+  ];
+}
+
+function isLeagueSetup(cfg, members) {
+  const hasMine = (members || []).some((m) => m.mine);
+  const hasImport = !!(cfg && cfg.leagueId) || (members || []).length > 0;
+  return hasMine && hasImport;
+}
+
+/* ---------- Home (weekly to-do — only screen beginners need) ---------- */
+function Home({
+  cfg, board, members, slots, nextDeadline, clock, lastRefresh, go,
+  onStartSetup, onOpenTools,
+}) {
+  const setup = isLeagueSetup(cfg, members);
+  const ai = useAiResult("ai:home");
+  const data = ai.data;
   const [err, setErr] = useState("");
-  const [data, setData] = useState(null);
-  const [cachedAt, setCachedAt] = useState(null);
   const [openWhy, setOpenWhy] = useState({});
+  const [openHow, setOpenHow] = useState({});
   const [copied, setCopied] = useState(null);
-  const cacheKey = aiWeekKey(clock) + "|" + rosterFingerprint(members, board);
-
-  const run = async () => {
-    setBusy(true); setErr(""); setOpenWhy({}); setCopied(null);
-    const roster = activeRoster(members, board);
-    const opp = await resolveNextOpponent(cfg, members);
-    const others = (members || []).filter((m) => !m.mine).map((m) => {
-      const names = (m.roster || []).slice(0, 6).map((p) => p.name + " (" + p.pos + ")").join(", ");
-      const isOpp = opp && ((m.rosterId != null && m.rosterId === opp.rosterId) || m === opp);
-      return (m.teamName || m.name || "Team") + (isOpp ? " [opponent]" : "") + (names ? ": " + names : "");
-    }).join("\n");
-    const user = [
-      "My roster: " + (roster.map((p) => p.name + " (" + p.pos + ")").join(", ") || "not set") + ".",
-      "Opponent: " + (opp ? (opp.teamName || opp.name) : "unknown") + ". Opponent roster: " +
-        (opp && opp.roster && opp.roster.length ? opp.roster.map((p) => p.name + " (" + p.pos + ")").join(", ") : "unknown") + ".",
-      "My slots: " + (slots || []).join(", ") + ".",
-      "Scoring: " + cfg.scoring + ".",
-      others ? "Other teams (top names):\n" + others : "",
-    ].filter(Boolean).join("\n");
-    try {
-      const j = extractJSON(await callClaudeSearch([{ role: "user", content: user }], { system: COACH_SYS(cfg.teams, cfg.scoring, cfg.format) }));
-      const actions = (Array.isArray(j.actions) ? j.actions : []).slice().sort((a, b) => (a.priority || 99) - (b.priority || 99));
-      const next = { deadline: j.deadline || (nextDeadline ? nextDeadline.label : ""), allSet: !!j.allSet, actions };
-      setData(next);
-      setCachedAt(Date.now());
-      saveAiAdvice("coach", cacheKey, next, aiStoreKey);
-    } catch (e) {
-      setErr(advisorError(e));
-    }
-    setBusy(false);
-  };
+  const [doneMap, setDoneMap] = useState({});
+  const [lineupVerify, setLineupVerify] = useState(null);
+  const [lineupCheckBusy, setLineupCheckBusy] = useState(false);
+  const doneStoreKey = "home:done:" + aiWeekKey(clock);
+  const verifyStoreKey = "home:lineupCheck:" + aiWeekKey(clock);
+  const verifyRanRef = useRef("");
 
   useEffect(() => {
     let cancelled = false;
-    loadAiAdvice("coach", cacheKey, aiStoreKey).then((rec) => {
+    Promise.all([
+      loadKey(doneStoreKey, {}, false),
+      loadKey(verifyStoreKey, null, false),
+    ]).then(([done, verify]) => {
       if (cancelled) return;
-      if (rec) { setData(rec.value); setCachedAt(rec.at); }
-      else { setData(null); setCachedAt(null); }
-      setHydrated(true);
+      setDoneMap(done && typeof done === "object" ? done : {});
+      if (verify && typeof verify === "object" && verify.at) setLineupVerify(verify);
     });
     return () => { cancelled = true; };
-  }, [cacheKey, aiStoreKey]);
+  }, [doneStoreKey, verifyStoreKey]);
 
-  const deadlineLine = data && data.deadline ? (
-    <div className="eyebrow" style={{ margin: "16px 0 12px" }}>Next deadline: {data.deadline}</div>
-  ) : null;
+  const run = async () => {
+    const hadPrior = data != null;
+    ai.begin(); setErr(""); setOpenWhy({}); setOpenHow({}); setCopied(null);
+    try {
+      const next = await fetchCoachAdvice({ cfg, board, members, slots, nextDeadline });
+      await ai.succeed(next);
+    } catch (e) {
+      if (hadPrior) ai.failKeep();
+      else { setErr(advisorError(e)); ai.end(); }
+    }
+  };
 
-  const actionBtn = (a, i) => {
+  const toggleDone = (key) => {
+    setDoneMap((prev) => {
+      const next = { ...prev, [key]: !prev[key] };
+      saveKey(doneStoreKey, next, false);
+      return next;
+    });
+  };
+
+  const meMember = (members || []).find((m) => m.mine);
+  const myRoster = meMember && Array.isArray(meMember.roster) ? meMember.roster : [];
+
+  useEffect(() => {
+    if (!setup || !ai.hydrated || !data) return;
+    if ((cfg.platform || "Sleeper") !== "Sleeper" || !cfg.leagueId) return;
+    if (!meMember || meMember.rosterId == null) return;
+    const lineupActions = (Array.isArray(data.actions) ? data.actions : []).filter(isLineupAction);
+    if (!lineupActions.length) return;
+
+    const runKey = [cfg.leagueId, meMember.rosterId, aiWeekKey(clock), lastRefresh || 0, lineupActions.map(coachActionKey).join(",")].join("|");
+    if (verifyRanRef.current === runKey) return;
+    verifyRanRef.current = runKey;
+
+    let cancelled = false;
+    (async () => {
+      setLineupCheckBusy(true);
+      const starters = await getMyStarters(cfg.leagueId, meMember.rosterId);
+      if (cancelled) return;
+      if (!starters) {
+        setLineupVerify((prev) => {
+          if (!prev || !prev.at) return prev;
+          const next = { ...prev, ok: false };
+          saveKey(verifyStoreKey, next, false);
+          return next;
+        });
+        setLineupCheckBusy(false);
+        return;
+      }
+      const starterSet = new Set(starters.map(String));
+      const results = {};
+      lineupActions.forEach((a) => {
+        const key = coachActionKey(a);
+        const player = lineupPlayerFromAction(a, myRoster);
+        if (!player || !player.player_id) {
+          results[key] = { name: "", playerId: "", starting: false, unmatched: true };
+          return;
+        }
+        const starting = starterSet.has(String(player.player_id));
+        results[key] = { name: player.name, playerId: String(player.player_id), starting };
+      });
+      const rec = { at: Date.now(), ok: true, results };
+      setLineupVerify(rec);
+      saveKey(verifyStoreKey, rec, false);
+      setDoneMap((prev) => {
+        const nextDone = { ...prev };
+        let changed = false;
+        Object.keys(results).forEach((key) => {
+          const r = results[key];
+          if (r.unmatched) return;
+          if (r.starting && !nextDone[key]) { nextDone[key] = true; changed = true; }
+          if (!r.starting && nextDone[key]) { nextDone[key] = false; changed = true; }
+        });
+        if (changed) saveKey(doneStoreKey, nextDone, false);
+        return changed ? nextDone : prev;
+      });
+      setLineupCheckBusy(false);
+    })();
+
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [setup, ai.hydrated, data, cfg.leagueId, cfg.platform, meMember && meMember.rosterId, clock, lastRefresh, verifyStoreKey, doneStoreKey]);
+
+  if (!setup) {
+    return (
+      <div className="card" style={{ marginTop: 16 }}>
+        <div className="homestatus">You have 1 thing to do.</div>
+        <div className="v" style={{ marginTop: 12 }}>Let's connect your team (2 minutes)</div>
+        <div className="empty" style={{ paddingTop: 8 }}>
+          Import your league and mark which team is yours. After that, this screen tells you exactly what to do each week.
+        </div>
+        <button className="btn" style={{ marginTop: 12 }} onClick={onStartSetup}>Get started</button>
+      </div>
+    );
+  }
+
+  const rawActions = (data && Array.isArray(data.actions) ? data.actions : []).filter((a) => String(a.type || "").toLowerCase() !== "none");
+  const pending = rawActions.filter((a) => !isActionDone(a, doneMap, lineupVerify));
+  const listEmpty = ai.hydrated && data && (data.allSet || rawActions.length === 0);
+  const todoCount = listEmpty || pending.length === 0 ? 0 : pending.length;
+  const deadlineLabel = (data && data.deadline) || (nextDeadline ? nextDeadline.label + (nextDeadline.when ? " · " + fmtCountdown(nextDeadline.when) : "") : "");
+  let statusLine = "Checking what you need to do…";
+  if (data || err) {
+    statusLine = todoCount === 0
+      ? "✓ You're all set for this week — nothing to do."
+      : "You have " + todoCount + " thing" + (todoCount === 1 ? "" : "s") + " to do.";
+  } else if (ai.hydrated && !ai.busy) {
+    statusLine = "Tap below to check your week.";
+  } else if (ai.busy) {
+    statusLine = "Checking what you need to do…";
+  }
+
+  const deadlineShort = (data && data.deadline)
+    || (nextDeadline ? nextDeadline.label + (nextDeadline.when ? " (" + fmtCountdown(nextDeadline.when) + ")" : "") : "the next deadline");
+
+  const actionControls = (a, i) => {
     const type = String(a.type || "").toLowerCase();
     const hasCopy = !!(a.copy && String(a.copy).trim());
-    if (type === "none") return null;
-    if (type === "trade" || hasCopy) {
+    if (type === "trade" || (hasCopy && type !== "lineup" && type !== "waiver" && type !== "drop")) {
       return (
         <button className="btn sm" onClick={() => { copyText(a.copy); setCopied(i); }}>
-          {copied === i ? "Copied" : "Copy"}
+          {copied === i ? "Copied" : "Copy message"}
         </button>
       );
     }
-    if (type === "lineup") return <button className="btn sm" onClick={() => go("week", "lineup")}>Set lineup</button>;
-    if (type === "waiver" || type === "drop") return <button className="btn sm" onClick={() => go("moves", "waiver")}>Open Moves</button>;
-    return null;
+    if (type === "lineup") {
+      return (
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <button type="button" className="btn sm ghost" onClick={() => setOpenHow((s) => ({ ...s, [i]: !s[i] }))}>
+            How to do this {openHow[i] ? "▴" : "▾"}
+          </button>
+          {go && (
+            <button type="button" className="btn sm ghost" onClick={() => go("week", "lineup")}>
+              Open lineup
+            </button>
+          )}
+        </div>
+      );
+    }
+    if (type === "waiver" || type === "drop") {
+      return (
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <button type="button" className="btn sm ghost" onClick={() => setOpenHow((s) => ({ ...s, [i]: !s[i] }))}>
+            How to claim {openHow[i] ? "▴" : "▾"}
+          </button>
+          {go && (
+            <button type="button" className="btn sm ghost" onClick={() => go("moves", "waiver")}>
+              Open Moves
+            </button>
+          )}
+        </div>
+      );
+    }
+    if (hasCopy) {
+      return (
+        <button className="btn sm" onClick={() => { copyText(a.copy); setCopied(i); }}>
+          {copied === i ? "Copied" : "Copy message"}
+        </button>
+      );
+    }
+    return (
+      <button type="button" className="btn sm ghost" onClick={() => setOpenHow((s) => ({ ...s, [i]: !s[i] }))}>
+        How to do this {openHow[i] ? "▴" : "▾"}
+      </button>
+    );
   };
 
-  const toolbar = (data || err) ? (
-    <div className="cardhead" style={{ marginTop: 16, marginBottom: 8 }}>
-      <span className="eyebrow">{cachedAt ? fmtRefreshAgo(cachedAt) : "This week"}</span>
-      <button className="btn ghost sm" onClick={run} disabled={busy}>{busy ? "Refreshing…" : "Refresh"}</button>
-    </div>
-  ) : null;
+  const hasLineupTodos = rawActions.some(isLineupAction);
+  const verifyLine = (() => {
+    if (!hasLineupTodos) return null;
+    if (lineupCheckBusy) return "Checking your Sleeper lineup…";
+    if (lineupVerify && lineupVerify.at && lineupVerify.ok) return "Lineup checked: " + fmtGeneratedAt(lineupVerify.at);
+    if (lineupVerify && lineupVerify.at && !lineupVerify.ok) {
+      return "Couldn't check your lineup just now — showing last check from " + fmtGeneratedAt(lineupVerify.at);
+    }
+    if (lineupVerify && lineupVerify.at) return "Lineup checked: " + fmtGeneratedAt(lineupVerify.at);
+    return null;
+  })();
 
   return (
     <div>
-      {toolbar}
-      {busy && (
-        <div className="card" style={{ marginTop: toolbar ? 0 : 16 }}>
+      {todoCount > 0 && (
+        <div className="homebanner" role="status">
+          ⚠ You have {todoCount} thing{todoCount === 1 ? "" : "s"} to do before {deadlineShort}
+        </div>
+      )}
+      <div className="homestatus" style={{ marginTop: todoCount > 0 ? 12 : 16 }}>{statusLine}</div>
+
+      <AiResultBar at={ai.at} busy={ai.busy} refreshFail={ai.refreshFail} onRefresh={data || err ? run : null} show={!!(data || err || ai.at)} />
+
+      {ai.busy && !data && (
+        <div className="card">
           <div className="empty" style={{ padding: 8, display: "flex", alignItems: "center" }}>
-            <span className="spin" /> Checking your team…
+            <span className="spin" /> Checking what you need to do this week…
           </div>
         </div>
       )}
-      {!busy && !hydrated && (
-        <div className="card" style={{ marginTop: 16 }}>
-          <div className="empty">Loading…</div>
-        </div>
+
+      {!ai.busy && !ai.hydrated && (
+        <div className="card"><div className="empty">Loading…</div></div>
       )}
-      {!busy && hydrated && !data && !err && (
-        <div className="card" style={{ marginTop: 16 }}>
+
+      {ai.hydrated && !data && !err && !ai.busy && (
+        <div className="card">
           <div className="empty" style={{ paddingTop: 0 }}>
-            Ask the coach for this week's lineup, waiver, and trade moves. It only runs when you tap — and it reuses the last read for a few hours.
+            Tap below once and we'll build this week's to-do list. It stays saved until you refresh.
           </div>
-          <DoMe onClick={run} busy={busy} working="Checking your team…" />
+          <DoMe onClick={run} busy={ai.busy} working="Checking…" label="Check my week" />
         </div>
       )}
-      {err && !busy && (
-        <div className="card" style={{ marginTop: toolbar ? 0 : 16 }}>
+
+      {err && !ai.busy && !data && (
+        <div className="card">
           <div className="note" style={{ borderColor: "var(--now)", marginTop: 0 }}>{err}</div>
-          <button className="btn" style={{ marginTop: 12 }} onClick={run}>Retry</button>
+          <button className="btn" style={{ marginTop: 12 }} onClick={run}>Try again</button>
         </div>
       )}
-      {data && !busy && (data.allSet || data.actions.length === 0) && (
-        <>
-          {deadlineLine}
-          <div className="card">
-            <div className="empty" style={{ color: "var(--go)", fontWeight: 700, padding: 4 }}>
-              You're set this week ✓ — nothing to change right now.
-            </div>
+
+      <div className={ai.busy && data ? "airesdim" : undefined}>
+        {listEmpty && !err && (
+          <div className="card homeallset">
+            <div className="v" style={{ color: "var(--go)" }}>You're winning-ready this week. Check back after Wednesday.</div>
+            {deadlineLabel && <div className="empty" style={{ paddingTop: 10 }}>Next deadline: {deadlineLabel}</div>}
           </div>
-        </>
-      )}
-      {data && !busy && !data.allSet && data.actions.length > 0 && (
-        <>
-          {deadlineLine}
-          <div className="grid" style={{ gap: 12 }}>
-            {data.actions.map((a, i) => (
-              <div className="card" key={i}>
-                <div className="coachrow">
-                  <div className="v">{a.verdict || "—"}</div>
-                  {actionBtn(a, i)}
-                </div>
-                {a.why && (
-                  <>
-                    <button type="button" className="coachwhybtn" onClick={() => setOpenWhy((s) => ({ ...s, [i]: !s[i] }))}>
-                      Why {openWhy[i] ? "▴" : "▾"}
-                    </button>
-                    {openWhy[i] && <div className="coachwhy">{a.why}</div>}
-                  </>
-                )}
+        )}
+
+        {data && !data.allSet && rawActions.length > 0 && (
+          <>
+            {hasLineupTodos && (
+              <div className="empty" style={{ paddingTop: 0, marginBottom: 8 }}>
+                We check your Sleeper lineup each time you open the app. We can't change it for you — Sleeper doesn't allow that — so you'll still set it in Sleeper, and we'll confirm it here.
+                {verifyLine && <div className="eyebrow" style={{ marginTop: 8 }}>{verifyLine}</div>}
               </div>
-            ))}
-          </div>
-        </>
-      )}
-    </div>
-  );
-}
-
-/* ---------- Dashboard ---------- */
-function Dashboard({ heroState, nextDeadline, deadlines, alerts, goInbox, goSettings, goFixWeek }) {
-  const label = { go: "On track", soon: "Coming up", now: "Act now" }[heroState];
-  return (
-    <>
-      <section className={"hero " + heroState}>
-        <div className="heroin">
-          <div>
-            <div className="eyebrow clocklabel">Next deadline{nextDeadline ? " · " + nextDeadline.label : ""}</div>
-            <div className="clock">{nextDeadline ? fmtCountdown(nextDeadline.when) : "—"}</div>
-          </div>
-          <div className="heroright">
-            <span className={"statepill pill-" + heroState}>
-              <span style={{ width: 7, height: 7, borderRadius: "50%", background: "currentColor" }} />{label}
-            </span>
-            <div className="heronext">
-              {nextDeadline
-                ? <>Then: <b>{deadlines[1]?.label || "—"}</b> {deadlines[1] ? "in " + fmtCountdown(deadlines[1].when) : ""}</>
-                : <>Set your deadlines in <b style={{ cursor: "pointer" }} onClick={goSettings}>Settings</b>.</>}
-            </div>
-            <div style={{ marginTop: 12 }}>
-              <DoMe onClick={goFixWeek} label="Open lineup" working="Opening…" />
-            </div>
-          </div>
-        </div>
-      </section>
-
-      <div className="grid g2">
-        <div className="card">
-          <div className="cardhead"><h3>League intel</h3><button className="btn ghost sm" onClick={goInbox}>Scan mail</button></div>
-          {alerts.filter(isWinningIntel).length === 0 ? (
-            <div className="empty">No Sleeper moves yet. Scan mail and we’ll only surface trades, injuries, and deadlines — never your inbox.</div>
-          ) : (
-            alerts.filter(isWinningIntel).slice(0, 5).map((a, i) => (
-              <div className="alert" key={i}>
-                <div className={"bar bar-" + (a.urgency === "now" ? "now" : "soon")} />
-                <div className="body">
-                  <div className="t">{a.summary}</div>
-                  {a.action && <div className="s">{a.action}</div>}
-                  <div className="meta">
-                    <span>{a.category}</span>{a.deadline && <span>⏱ {a.deadline}</span>}{a.player && <span>{a.player}</span>}
+            )}
+            <div className="grid" style={{ gap: 12 }}>
+              {rawActions.map((a, i) => {
+                const key = coachActionKey(a);
+                const isDone = isActionDone(a, doneMap, lineupVerify);
+                const type = String(a.type || "").toLowerCase();
+                const howForTradeCopy = type === "trade" || (a.copy && type !== "lineup" && type !== "waiver" && type !== "drop");
+                const lineupResult = type === "lineup" && lineupVerify && lineupVerify.results ? lineupVerify.results[key] : null;
+                const showNotDone = type === "lineup" && lineupResult && !lineupResult.starting && !lineupResult.unmatched;
+                const manualToggle = type !== "lineup" || !lineupResult || lineupResult.unmatched;
+                return (
+                  <div className={"card" + (isDone ? " homedone-card" : "")} key={key + "-" + i}>
+                    <div className="hometodorow">
+                      {manualToggle ? (
+                        <label className="homedone">
+                          <input type="checkbox" checked={isDone} onChange={() => toggleDone(key)} />
+                          <span>Mark done</span>
+                        </label>
+                      ) : (
+                        <span className={"homedone " + (isDone ? "" : "homewarn")}>
+                          {isDone ? "✓ Confirmed in Sleeper" : "⚠ Not done yet"}
+                        </span>
+                      )}
+                      <span className="homenum">{i + 1}</span>
+                    </div>
+                    <div className="v" style={{ marginTop: 8 }}>{a.verdict || "—"}</div>
+                    {showNotDone && (
+                      <div className="empty" style={{ paddingTop: 6, color: "var(--now)" }}>
+                        Still not in your starting lineup on Sleeper.
+                      </div>
+                    )}
+                    {a.why && (
+                      <>
+                        <button type="button" className="coachwhybtn" onClick={() => setOpenWhy((s) => ({ ...s, [i]: !s[i] }))}>
+                          Why? {openWhy[i] ? "▴" : "▾"}
+                        </button>
+                        {openWhy[i] && <div className="coachwhy">{a.why}</div>}
+                      </>
+                    )}
+                    {!isDone && <div style={{ marginTop: 12 }}>{actionControls(a, i)}</div>}
+                    {!isDone && openHow[i] && !howForTradeCopy && (
+                      <ol className="howto">
+                        {sleeperHowTo(type).map((step, si) => <li key={si}>{step}</li>)}
+                      </ol>
+                    )}
                   </div>
-                </div>
-              </div>
-            ))
-          )}
-        </div>
-
-        <div className="card">
-          <h3>Upcoming deadlines</h3>
-          {deadlines.length === 0 ? <div className="empty">No deadlines set.</div> :
-            deadlines.map((d) => {
-              const u = urgencyFor(d.when);
-              return (
-                <div className="alert" key={d.key}>
-                  <div className={"bar bar-" + u} />
-                  <div className="body">
-                    <div className="t">{d.label}</div>
-                    <div className="meta"><span className="mono" style={{ textTransform: "none", letterSpacing: 0 }}>{fmtCountdown(d.when)}</span><span>{DAYS[d.when.getDay()]} {d.when.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}</span></div>
-                  </div>
-                </div>
-              );
-            })}
-        </div>
+                );
+              })}
+            </div>
+          </>
+        )}
       </div>
-    </>
+
+      <button type="button" className="hometools" onClick={onOpenTools}>
+        Tools ▸
+      </button>
+    </div>
   );
 }
 
@@ -1499,8 +1747,9 @@ function DraftRoom({ cfg, board, setBoard }) {
   const [q, setQ] = useState("");
   const [posf, setPosf] = useState("ALL");
   const [advQ, setAdvQ] = useState("");
-  const [advOut, setAdvOut] = useState("");
-  const [advBusy, setAdvBusy] = useState(false);
+  const ai = useAiResult("ai:draft");
+  const advOut = typeof ai.data === "string" ? ai.data : "";
+  const [advErr, setAdvErr] = useState("");
 
   const mark = (id, state) => {
     const next = { ...board };
@@ -1519,18 +1768,19 @@ function DraftRoom({ cfg, board, setBoard }) {
   let lastTier = null;
 
   const askAdvisor = async () => {
-    setAdvBusy(true); setAdvOut("");
+    const hadPrior = !!advOut;
+    ai.begin(); setAdvErr("");
     const available = PLAYERS.filter((p) => !board[p.id]).slice(0, 24).map((p) => `${p.name} (${p.pos}, ADP ${p.adp})`).join("; ");
     const roster = mine.map((p) => `${p.name} (${p.pos})`).join(", ") || "none yet";
     const sys = "You are a sharp fantasy football draft advisor for a 12-team PPR league. Be concise and specific: recommend the single best pick and one or two alternates, each with a one-line reason. Favor RB scarcity and PPR pass-catchers. 4 sentences max.";
     const user = `My draft slot: ${cfg.slot || "unknown"}. Format: ${cfg.format}. My roster so far: ${roster}. Best available (by ADP): ${available}. Question: ${advQ || "Who should I take next?"}`;
     try {
       const out = await callClaude([{ role: "user", content: user }], { system: sys, model: MODEL_FAST, max_tokens: 500 });
-      setAdvOut(out || "No response.");
+      await ai.succeed(out || "No response.");
     } catch (e) {
-      setAdvOut(advisorError(e));
+      if (hadPrior) ai.failKeep();
+      else { setAdvErr(advisorError(e)); ai.end(); }
     }
-    setAdvBusy(false);
   };
 
   return (
@@ -1587,9 +1837,11 @@ function DraftRoom({ cfg, board, setBoard }) {
             <h3>Ask the draft advisor</h3>
             <textarea placeholder="e.g. RB or WR here? Should I take a QB now?" value={advQ} onChange={(e) => setAdvQ(e.target.value)} />
             <div style={{ marginTop: 10 }}>
-              <DoMe onClick={askAdvisor} busy={advBusy} working="Picking…" />
+              <DoMe onClick={askAdvisor} busy={ai.busy} working="Picking…" />
             </div>
-            {advOut && <div className="out">{advOut}</div>}
+            <AiResultBar at={ai.at} busy={ai.busy} refreshFail={ai.refreshFail} onRefresh={advOut ? askAdvisor : null} show={!!(advOut || ai.at)} />
+            {advErr && !advOut && <div className="note" style={{ borderColor: "var(--now)" }}>{advErr}</div>}
+            {advOut && <div className={"out" + (ai.busy ? " airesdim" : "")}>{advOut}</div>}
             <div className="note">Reads your slot, roster, and who's still available, then recommends a pick. Mark players <b>Mine</b> or <b>Out</b> as the draft unfolds to keep it accurate.</div>
           </div>
         </div>
@@ -1727,7 +1979,7 @@ function AnthropicWorkspaceCard() {
     <div className="card">
       <h3>Advisor cost</h3>
       <div className="empty" style={{ paddingTop: 0 }}>
-        Draft, start/sit, intel, chat, and the roster builder use a cheaper model. Coach, lineup, matchup, and trades use Sonnet — and only when you tap. Weekly coach advice is reused for a few hours.
+        Draft, start/sit, intel, chat, and the roster builder use a cheaper model. Home, lineup, matchup, and trades use Sonnet — and only when you tap. Weekly Home advice stays saved until you refresh.
       </div>
       <div className="remctl" style={{ marginTop: 10 }}>
         <button className={"btn sm " + (searchOn ? "" : "ghost")} onClick={toggleSearch}>
@@ -1735,7 +1987,7 @@ function AnthropicWorkspaceCard() {
         </button>
       </div>
       <div className="note">
-        Web search is the expensive part (Coach, lineup, matchup, trades). Turn it off to skip search bills; those tools still run on the model's own knowledge.
+        Web search is the expensive part (Home, lineup, matchup, trades). Turn it off to skip search bills; those tools still run on the model's own knowledge.
       </div>
       <h3 style={{ marginTop: 18 }}>Anthropic workspace</h3>
       <div className="empty" style={{ paddingTop: 0 }}>
@@ -1756,12 +2008,13 @@ function AnthropicWorkspaceCard() {
     </div>
   );
 }
-function Reminders({ rem, setRem, deadlines, cfg, alertsOn, notifPerm, enableAlerts, testAlert }) {
+function Reminders({ rem, setRem, cfg }) {
   const set = (patch) => setRem({ ...rem, ...patch });
 
   const lineup = nextWeekly(rem.lineupDay, rem.lineupTime);
   const waiver = nextWeekly(rem.waiverDay, rem.waiverTime);
   const trade = rem.tradeDeadline ? new Date(rem.tradeDeadline + "T12:00:00") : null;
+  const byDay = ["SU", "MO", "TU", "WE", "TH", "FR", "SA"];
 
   const daySel = (val, on) => (
     <select value={val} onChange={(e) => on(Number(e.target.value))}>
@@ -1772,7 +2025,10 @@ function Reminders({ rem, setRem, deadlines, cfg, alertsOn, notifPerm, enableAle
   return (
     <div className="grid g2">
       <div className="card">
-        <h3>Weekly reminders</h3>
+        <h3>Reminders</h3>
+        <div className="empty" style={{ paddingTop: 0, marginBottom: 4 }}>
+          Add these to your phone's calendar and it'll remind you — even when the app is closed.
+        </div>
 
         <div className="rem">
           <div className="remhead">
@@ -1783,7 +2039,15 @@ function Reminders({ rem, setRem, deadlines, cfg, alertsOn, notifPerm, enableAle
             <label>Every</label>{daySel(rem.lineupDay, (v) => set({ lineupDay: v }))}
             <label>at</label>
             <input type="time" value={rem.lineupTime} onChange={(e) => set({ lineupTime: e.target.value })} />
-            <button className="btn ghost sm" onClick={() => downloadICS("Set fantasy lineup — " + cfg.league, lineup, { rrule: "FREQ=WEEKLY;BYDAY=" + ["SU","MO","TU","WE","TH","FR","SA"][rem.lineupDay], desc: "Lock your lineup before games start." })}>Add to calendar</button>
+            <button
+              className="btn sm"
+              onClick={() => downloadICS("Set fantasy lineup — " + cfg.league, lineup, {
+                rrule: "FREQ=WEEKLY;BYDAY=" + byDay[rem.lineupDay],
+                desc: "Lock your lineup before games start.",
+              })}
+            >
+              Add to calendar
+            </button>
           </div>
         </div>
 
@@ -1796,7 +2060,15 @@ function Reminders({ rem, setRem, deadlines, cfg, alertsOn, notifPerm, enableAle
             <label>Every</label>{daySel(rem.waiverDay, (v) => set({ waiverDay: v }))}
             <label>at</label>
             <input type="time" value={rem.waiverTime} onChange={(e) => set({ waiverTime: e.target.value })} />
-            <button className="btn ghost sm" onClick={() => downloadICS("Submit waiver claims — " + cfg.league, waiver, { rrule: "FREQ=WEEKLY;BYDAY=" + ["SU","MO","TU","WE","TH","FR","SA"][rem.waiverDay], desc: "Get your waiver claims in before they process." })}>Add to calendar</button>
+            <button
+              className="btn sm"
+              onClick={() => downloadICS("Submit waiver claims — " + cfg.league, waiver, {
+                rrule: "FREQ=WEEKLY;BYDAY=" + byDay[rem.waiverDay],
+                desc: "Get your waiver claims in before they process.",
+              })}
+            >
+              Add to calendar
+            </button>
           </div>
         </div>
 
@@ -1808,28 +2080,17 @@ function Reminders({ rem, setRem, deadlines, cfg, alertsOn, notifPerm, enableAle
           <div className="remctl">
             <label>Date</label>
             <input type="date" value={rem.tradeDeadline} onChange={(e) => set({ tradeDeadline: e.target.value })} />
-            {trade && <button className="btn ghost sm" onClick={() => downloadICS("Trade deadline — " + cfg.league, new Date(trade.getTime() - 24 * 3600000), { desc: "Last day to make trades — get offers in now." })}>Add to calendar</button>}
+            {trade && (
+              <button
+                className="btn sm"
+                onClick={() => downloadICS("Trade deadline — " + cfg.league, new Date(trade.getTime() - 24 * 3600000), {
+                  desc: "Last day to make trades — get offers in now.",
+                })}
+              >
+                Add to calendar
+              </button>
+            )}
           </div>
-        </div>
-      </div>
-
-      <div className="card">
-        <h3>Phone alerts</h3>
-        <div className="remctl" style={{ marginTop: 0 }}>
-          <button className="btn" onClick={enableAlerts}>{alertsOn ? "Alerts on ✓" : "Enable phone alerts"}</button>
-          <button className="btn ghost" onClick={testAlert}>Send test alert</button>
-        </div>
-        <div className="empty" style={{ paddingTop: 10 }}>
-          {notifPerm === "granted" ? "Notifications allowed. While the app is open you'll get a popup, a buzz, and a system notification as each deadline gets close."
-            : notifPerm === "denied" ? "System notifications are blocked in your browser settings — you'll still get the in-app popup and vibration."
-            : notifPerm === "unsupported" ? "This browser won't show system notifications here — you'll still get the in-app popup and, on Android, a vibration."
-            : "Tap Enable to allow a popup, vibration, and system notification when deadlines get close."}
-        </div>
-        <div className="note">
-          In-app alerts fire while League HQ is open. For a reminder that reaches you when the app is <b>closed</b>, use <b>Add to calendar</b> on each deadline — that drops a recurring event with a real notification into Apple or Google Calendar, which is what buzzes your phone before games. iPhone doesn't support in-app vibration, so calendar alerts are the way there.
-        </div>
-        <div className="note">
-          Countdowns turn <span style={{ color: "var(--soon)", fontWeight: 700 }}>amber</span> under 24h and <span style={{ color: "var(--now)", fontWeight: 700 }}>red</span> under 3h. Defaults suit a Sunday-slate league — adjust the day and time to your rules.
         </div>
       </div>
 
@@ -1947,8 +2208,9 @@ function WaiversList({ cfg, members }) {
 function Moves({ cfg, board, members, pane = "start" }) {
   const tabm = pane;
   const [qStart, setQStart] = useState("");
-  const [outStart, setOutStart] = useState("");
-  const [busy, setBusy] = useState("");
+  const ai = useAiResult("ai:startsit");
+  const outStart = typeof ai.data === "string" ? ai.data : "";
+  const [errStart, setErrStart] = useState("");
 
   const active = activeRoster(members, board);
   const roster = active.map((p) => `${p.name} (${p.pos})`).join(", ") || "not set yet";
@@ -1958,12 +2220,17 @@ function Moves({ cfg, board, members, pane = "start" }) {
   const byeWeeks = Object.keys(byeMap).map(Number).sort((a, b) => a - b);
 
   const startSit = async () => {
-    setBusy("start"); setOutStart("");
+    const hadPrior = outStart != null && outStart !== "";
+    ai.begin(); setErrStart("");
     const sys = "You are a fantasy football start/sit advisor for a 12-team PPR league. Give a clear START or SIT verdict for each player named, with one line of reasoning each, weighing matchup and PPR volume. Be decisive. 5 sentences max.";
     const q = qStart.trim() || "Set my full lineup this week. For every starting spot, tell me who to START and who to SIT from my roster. Be decisive.";
-    try { setOutStart(await callClaude([{ role: "user", content: `My roster: ${roster}. Format: ${cfg.format}. Question: ${q}` }], { system: sys, model: MODEL_FAST, max_tokens: 600 })); }
-    catch (e) { setOutStart(advisorError(e)); }
-    setBusy("");
+    try {
+      const out = await callClaude([{ role: "user", content: `My roster: ${roster}. Format: ${cfg.format}. Question: ${q}` }], { system: sys, model: MODEL_FAST, max_tokens: 600 });
+      await ai.succeed(out || "No response.");
+    } catch (e) {
+      if (hadPrior) ai.failKeep();
+      else { setErrStart(advisorError(e)); ai.end(); }
+    }
   };
 
   return (
@@ -1975,9 +2242,11 @@ function Moves({ cfg, board, members, pane = "start" }) {
         <div className="advisor">
           <textarea placeholder="e.g. Start Chase Brown or Bucky Irving at flex?" value={qStart} onChange={(e) => setQStart(e.target.value)} />
           <div style={{ marginTop: 10 }}>
-            <DoMe onClick={startSit} busy={busy === "start"} working="Calling…" />
+            <DoMe onClick={startSit} busy={ai.busy} working="Calling…" />
           </div>
-          {outStart && <div className="out">{outStart}</div>}
+          <AiResultBar at={ai.at} busy={ai.busy} refreshFail={ai.refreshFail} onRefresh={outStart ? startSit : null} show={!!(outStart || ai.at)} />
+          {errStart && !outStart && <div className="note" style={{ borderColor: "var(--now)" }}>{errStart}</div>}
+          {outStart && <div className={"out" + (ai.busy ? " airesdim" : "")}>{outStart}</div>}
         </div>
       )}
       {tabm === "waiver" && <WaiversList cfg={cfg} members={members} />}
@@ -2035,34 +2304,45 @@ function Tier({ label, tone, d }) {
 function Trades({ cfg, board, members, offers, setOffers, goLeague }) {
   const [sub, setSub] = useState("find");
   const [targetName, setTargetName] = useState("");
-  const [ideas, setIdeas] = useState(null);
-  const [busyF, setBusyF] = useState(false); const [errF, setErrF] = useState("");
+  const aiFind = useAiResult("ai:trades");
+  const ideas = Array.isArray(aiFind.data) ? aiFind.data : null;
+  const [errF, setErrF] = useState("");
   const [offGive, setOffGive] = useState(""); const [offWant, setOffWant] = useState("");
-  const [resp, setResp] = useState(null);
-  const [busyR, setBusyR] = useState(false); const [errR, setErrR] = useState("");
+  const aiResp = useAiResult("ai:respond");
+  const resp = aiResp.data && typeof aiResp.data === "object" ? aiResp.data : null;
+  const [errR, setErrR] = useState("");
   const [nWho, setNWho] = useState(""); const [nGive, setNGive] = useState(""); const [nGet, setNGet] = useState("");
 
   const roster = activeRoster(members, board);
   const { need, surplus, myList } = rosterNeeds(roster);
 
   const runFind = async () => {
-    setBusyF(true); setIdeas(null); setErrF("");
+    const hadPrior = ideas != null;
+    aiFind.begin(); setErrF("");
     const target = members.find((m) => m.name === targetName);
     const targetStr = target ? `${target.teamName} (${target.name}) — notes on their roster: ${target.notes || "unknown; infer from a typical roster"}` : "any league team (pick whichever fit is best)";
     const sys = "You are a top-tier fantasy football trade strategist for a 12-team PPR league. If web_search is available, use it to check CURRENT player value, role, and injury news before valuing anyone. Propose realistic trades I could send. For EACH idea give two framings: a 'gentlemans' offer (fair, likely accepted, still net-positive for me) and an 'aggressive' offer (maximum return for me, lower acceptance odds). Respond with ONLY JSON, no prose: {\"ideas\":[{\"theme\":\"short label\",\"rationale\":\"why it fits both teams' needs\",\"gentlemans\":{\"give\":[\"player\"],\"get\":[\"player\"],\"why\":\"one line\",\"acceptOdds\":\"high|medium|low\"},\"aggressive\":{\"give\":[\"player\"],\"get\":[\"player\"],\"why\":\"one line\",\"acceptOdds\":\"high|medium|low\"}}]}. 2-3 ideas.";
     const user = `My roster: ${myList}. My needs: ${need.join(", ") || "balanced"}. My surplus: ${surplus.join(", ") || "none"}. Trade target: ${targetStr}. Format: ${cfg.format}.`;
-    try { const j = extractJSON(await callClaudeSearch([{ role: "user", content: user }], { system: sys })); setIdeas(j.ideas || []); }
-    catch (e) { setErrF(advisorError(e)); }
-    setBusyF(false);
+    try {
+      const j = extractJSON(await callClaudeSearch([{ role: "user", content: user }], { system: sys }));
+      await aiFind.succeed(j.ideas || []);
+    } catch (e) {
+      if (hadPrior) aiFind.failKeep();
+      else { setErrF(advisorError(e)); aiFind.end(); }
+    }
   };
 
   const runRespond = async () => {
-    setBusyR(true); setResp(null); setErrR("");
+    const hadPrior = resp != null;
+    aiResp.begin(); setErrR("");
     const sys = "You are a top-tier fantasy football trade strategist for a 12-team PPR league. If web_search is available, use it for CURRENT values, roles, and injuries. Evaluate the incoming offer from MY perspective and return a verdict plus two counter-offers. Respond with ONLY JSON, no prose: {\"verdict\":\"accept|decline|counter\",\"read\":\"plainly, who wins and by how much\",\"gentlemans\":{\"counter\":\"give X, get Y\",\"why\":\"one line\",\"acceptOdds\":\"high|medium|low\",\"message\":\"a friendly message I can send them\"},\"aggressive\":{\"counter\":\"give X, get Y\",\"why\":\"one line\",\"acceptOdds\":\"high|medium|low\",\"message\":\"a firm message I can send them\"}}.";
     const user = `My roster: ${myList}. Incoming offer — they GIVE me: ${offGive || "(nothing entered)"}; they WANT from me: ${offWant || "(nothing entered)"}. Format: ${cfg.format}.`;
-    try { setResp(extractJSON(await callClaudeSearch([{ role: "user", content: user }], { system: sys }))); }
-    catch (e) { setErrR(advisorError(e)); }
-    setBusyR(false);
+    try {
+      await aiResp.succeed(extractJSON(await callClaudeSearch([{ role: "user", content: user }], { system: sys })));
+    } catch (e) {
+      if (hadPrior) aiResp.failKeep();
+      else { setErrR(advisorError(e)); aiResp.end(); }
+    }
   };
 
   const addOffer = () => {
@@ -2092,20 +2372,23 @@ function Trades({ cfg, board, members, offers, setOffers, goLeague }) {
                 <option value="">Any team — find the best fit</option>
                 {members.map((m, i) => <option key={i} value={m.name}>{m.teamName || m.name}</option>)}
               </select>
-              <DoMe onClick={runFind} busy={busyF} working="Finding trades…" />
+              <DoMe onClick={runFind} busy={aiFind.busy} working="Finding trades…" />
             </div>
             {members.length === 0 && <div className="note">Tip: import your league in <b onClick={goLeague} style={{ cursor: "pointer", textDecoration: "underline" }}>League → Teams</b> so suggestions can target real managers.</div>}
-            {errF && <div className="note" style={{ borderColor: "var(--now)" }}>{errF}</div>}
-            {ideas && ideas.length === 0 && <div className="empty">No clean fits found right now. Try a specific target team, or check back after roster news moves.</div>}
-            {ideas && ideas.map((idea, i) => (
-              <div className="idea" key={i}>
-                <div className="idea-h">{idea.theme || "Trade idea"}</div>
-                {idea.rationale && <div className="idea-r">{idea.rationale}</div>}
-                <Tier label="Gentleman's" tone="go" d={idea.gentlemans} />
-                <Tier label="Aggressive" tone="now" d={idea.aggressive} />
-              </div>
-            ))}
-            {ideas && <div className="note">Values checked against live news at run time. Always eyeball the names before you send — injuries move fast.</div>}
+            <AiResultBar at={aiFind.at} busy={aiFind.busy} refreshFail={aiFind.refreshFail} onRefresh={ideas ? runFind : null} show={!!(ideas || aiFind.at)} />
+            {errF && !ideas && <div className="note" style={{ borderColor: "var(--now)" }}>{errF}</div>}
+            <div className={aiFind.busy && ideas ? "airesdim" : undefined}>
+              {ideas && ideas.length === 0 && <div className="empty">No clean fits found right now. Try a specific target team, or check back after roster news moves.</div>}
+              {ideas && ideas.map((idea, i) => (
+                <div className="idea" key={i}>
+                  <div className="idea-h">{idea.theme || "Trade idea"}</div>
+                  {idea.rationale && <div className="idea-r">{idea.rationale}</div>}
+                  <Tier label="Gentleman's" tone="go" d={idea.gentlemans} />
+                  <Tier label="Aggressive" tone="now" d={idea.aggressive} />
+                </div>
+              ))}
+              {ideas && <div className="note">Values checked against live news at run time. Always eyeball the names before you send — injuries move fast.</div>}
+            </div>
           </div>
         )}
 
@@ -2113,10 +2396,11 @@ function Trades({ cfg, board, members, offers, setOffers, goLeague }) {
           <div>
             <div className="obf"><label>They give me</label><input value={offGive} onChange={(e) => setOffGive(e.target.value)} placeholder="e.g. Ladd McConkey, Tony Pollard" /></div>
             <div className="obf"><label>They want from me</label><input value={offWant} onChange={(e) => setOffWant(e.target.value)} placeholder="e.g. Chase Brown" /></div>
-            <DoMe onClick={runRespond} busy={busyR} working="Evaluating…" />
-            {errR && <div className="note" style={{ borderColor: "var(--now)", marginTop: 12 }}>{errR}</div>}
+            <DoMe onClick={runRespond} busy={aiResp.busy} working="Evaluating…" />
+            <AiResultBar at={aiResp.at} busy={aiResp.busy} refreshFail={aiResp.refreshFail} onRefresh={resp ? runRespond : null} show={!!(resp || aiResp.at)} />
+            {errR && !resp && <div className="note" style={{ borderColor: "var(--now)", marginTop: 12 }}>{errR}</div>}
             {resp && (
-              <div className="idea" style={{ marginTop: 14 }}>
+              <div className={"idea" + (aiResp.busy ? " airesdim" : "")} style={{ marginTop: 14 }}>
                 <div className="idea-h">Verdict: <span className={"verdict " + (resp.verdict === "accept" ? "go" : resp.verdict === "decline" ? "now" : "soon")}>{(resp.verdict || "").toUpperCase()}</span></div>
                 {resp.read && <div className="idea-r">{resp.read}</div>}
                 <Tier label="Gentleman's counter" tone="go" d={resp.gentlemans} />
@@ -2203,7 +2487,7 @@ function League({ cfg, setCfg, members, setMembers }) {
           <ol style={{ fontSize: 13, lineHeight: 1.6, color: "var(--muted)", paddingLeft: 20 }}>
             <li>Create an app at <b>developer.yahoo.com/apps</b> (Fantasy Sports API).</li>
             <li>Redirect URI: <b>https://fantasy-football-manager-210cc.web.app/api/yahoo/callback</b></li>
-            <li>Put <b>YAHOO_CLIENT_ID</b> and <b>YAHOO_CLIENT_SECRET</b> in <b>functions/.env</b>, then run <b>firebase deploy --only functions</b>.</li>
+            <li>Put <b>YAHOO_CLIENT_ID</b> and <b>YAHOO_CLIENT_SECRET</b> in the project <b>.env</b>, then restart the App Hosting / API server.</li>
             <li>Click Connect Yahoo, then paste your league key (from the Yahoo league URL, like nfl.l.123456) and Import.</li>
           </ol>
           <button className="btn ghost sm" onClick={() => window.open("/api/yahoo/auth", "_blank")}>Connect Yahoo account</button>
@@ -2214,7 +2498,7 @@ function League({ cfg, setCfg, members, setMembers }) {
           <ol style={{ fontSize: 13, lineHeight: 1.6, color: "var(--muted)", paddingLeft: 20 }}>
             <li>Public league: paste the numeric ESPN league ID and Import. No extra API key.</li>
             <li>Private league: in Chrome, open espn.com, DevTools → Application → Cookies. Copy <b>espn_s2</b> and <b>SWID</b>.</li>
-            <li>Put them in <b>functions/.env</b> as <b>ESPN_S2</b> and <b>ESPN_SWID</b>, then <b>firebase deploy --only functions</b>, then Import.</li>
+            <li>Put them in the project <b>.env</b> as <b>ESPN_S2</b> and <b>ESPN_SWID</b>, restart the API, then Import.</li>
           </ol>
         </div>
       )}
@@ -2301,18 +2585,29 @@ function GroupChat({ alerts, setAlerts, offers, setOffers }) {
 /* ---------- Roster Builder (consensus-driven roster architect) ---------- */
 function RosterBuilder({ cfg, slots, board, setBoard, members, saved, setSaved }) {
   const fullSlots = [...slots, "BN", "BN", "BN", "BN", "BN", "BN"];
+  const ai = useAiResult("ai:build");
   const [mode, setMode] = useState("draft");
-  const [res, setRes] = useState(saved && saved.res ? saved.res : null);
-  const [assign, setAssign] = useState(saved && saved.assign ? saved.assign : fullSlots.map(() => null));
-  const [busy, setBusy] = useState(false);
+  const [res, setRes] = useState(() => (ai.data && ai.data.res) || (saved && saved.res) || null);
+  const [assign, setAssign] = useState(() => (ai.data && ai.data.assign) || (saved && saved.assign) || fullSlots.map(() => null));
   const [err, setErr] = useState("");
   const [note, setNote] = useState("");
   const [pinned, setPinned] = useState(false);
+  const hydratedRef = useRef(false);
+
+  useEffect(() => {
+    if (!ai.hydrated || hydratedRef.current) return;
+    hydratedRef.current = true;
+    if (ai.data && ai.data.res) {
+      setRes(ai.data.res);
+      if (ai.data.assign) setAssign(ai.data.assign);
+    }
+  }, [ai.hydrated, ai.data]);
 
   const current = activeRoster(members, board);
 
   const generate = async () => {
-    setBusy(true); setErr(""); setNote(""); setPinned(false);
+    const hadPrior = !!res;
+    ai.begin(); setErr(""); setNote(""); setPinned(false);
     const where = mode === "draft"
       ? `Build the optimal DRAFT-TARGET roster to aim for from draft slot ${cfg.slot || "unknown"}. Make it realistically draftable — each player's ADP should be reachable at the round I'd actually pick.`
       : `Given my current roster (${current.map((p) => `${p.name} (${p.pos})`).join(", ") || "empty"}), build the optimal roster I should end up with after realistic adds, drops, and trades. Note which are new targets.`;
@@ -2321,15 +2616,23 @@ function RosterBuilder({ cfg, slots, board, setBoard, members, saved, setSaved }
     try {
       const j = extractJSON(await callClaude([{ role: "user", content: "ADP board (best available first): " + adp }], { system: sys, model: MODEL_FAST, max_tokens: 1500 }));
       if (!j || !Array.isArray(j.roster) || !j.roster.length) throw new Error("empty");
+      const nextAssign = fullSlots.map((s, i) => (j.roster[i] && j.roster[i].player) ? j.roster[i].player : null);
       setRes(j);
-      setAssign(fullSlots.map((s, i) => (j.roster[i] && j.roster[i].player) ? j.roster[i].player : null));
+      setAssign(nextAssign);
+      await ai.succeed({ res: j, assign: nextAssign, mode });
     } catch (e) {
-      const local = localRoster(cfg, fullSlots);
-      setRes(local);
-      setAssign(fullSlots.map((s, i) => (local.roster[i] && local.roster[i].player) ? local.roster[i].player : null));
-      setNote(advisorError(e) + " Using League HQ's cached 2026 consensus ADP until live advice works.");
+      if (hadPrior) {
+        ai.failKeep();
+        setErr(advisorError(e));
+      } else {
+        const local = localRoster(cfg, fullSlots);
+        const nextAssign = fullSlots.map((s, i) => (local.roster[i] && local.roster[i].player) ? local.roster[i].player : null);
+        setRes(local);
+        setAssign(nextAssign);
+        await ai.succeed({ res: local, assign: nextAssign, mode });
+        setNote(advisorError(e) + " Using League HQ's cached 2026 consensus ADP until live advice works.");
+      }
     }
-    setBusy(false);
   };
 
   const poolFor = (slot) => {
@@ -2359,7 +2662,7 @@ function RosterBuilder({ cfg, slots, board, setBoard, members, saved, setSaved }
       <div className="card">
         <div className="cardhead">
           <h3>Roster builder</h3>
-          <DoMe onClick={generate} busy={busy} working="Building…" />
+          <DoMe onClick={generate} busy={ai.busy} working="Building…" />
         </div>
         <div className="posfilter" style={{ marginBottom: 10 }}>
           <button className={mode === "draft" ? "on" : ""} onClick={() => setMode("draft")}>Draft target</button>
@@ -2368,41 +2671,44 @@ function RosterBuilder({ cfg, slots, board, setBoard, members, saved, setSaved }
         <div className="empty" style={{ paddingTop: 0 }}>
           Builds a recommended roster for your {cfg.teams}-team {cfg.scoring} league from the in-app 2026 ADP board. Every spot is editable, and you can push the picks into your Draft Room.
         </div>
+        <AiResultBar at={ai.at} busy={ai.busy} refreshFail={ai.refreshFail} onRefresh={res ? generate : null} show={!!(res || ai.at)} />
         {err && <div className="note" style={{ borderColor: "var(--now)" }}>{err}</div>}
         {note && <div className="note" style={{ borderColor: "var(--soon)" }}>{note}</div>}
-        {res && res.summary && <div className="idea-r" style={{ marginTop: 10 }}>{res.summary}</div>}
+        <div className={ai.busy && res ? "airesdim" : undefined}>
+          {res && res.summary && <div className="idea-r" style={{ marginTop: 10 }}>{res.summary}</div>}
 
-        {res && (
-          <div style={{ marginTop: 8 }}>
-            {fullSlots.map((s, i) => {
-              const pool = poolFor(s);
-              const info = infoFor(assign[i]);
-              return (
-                <div className="lrow" key={i}>
-                  <span className="lslot">{s}</span>
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <select value={assign[i] || ""} onChange={(e) => swap(i, e.target.value)}>
-                      <option value="">— empty —</option>
-                      {assign[i] && !pool.some((p) => p.name === assign[i]) && <option value={assign[i]}>{assign[i]}</option>}
-                      {pool.map((p) => <option key={p.name} value={p.name}>{p.name} ({p.pos})</option>)}
-                    </select>
-                    {info && info.why && <div className="lwhy">{info.why}{info.tier ? " · " + info.tier : ""}</div>}
+          {res && (
+            <div style={{ marginTop: 8 }}>
+              {fullSlots.map((s, i) => {
+                const pool = poolFor(s);
+                const info = infoFor(assign[i]);
+                return (
+                  <div className="lrow" key={i}>
+                    <span className="lslot">{s}</span>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <select value={assign[i] || ""} onChange={(e) => swap(i, e.target.value)}>
+                        <option value="">— empty —</option>
+                        {assign[i] && !pool.some((p) => p.name === assign[i]) && <option value={assign[i]}>{assign[i]}</option>}
+                        {pool.map((p) => <option key={p.name} value={p.name}>{p.name} ({p.pos})</option>)}
+                      </select>
+                      {info && info.why && <div className="lwhy">{info.why}{info.tier ? " · " + info.tier : ""}</div>}
+                    </div>
+                    {info && info.adp && <span className="lproj">{info.adp}</span>}
                   </div>
-                  {info && info.adp && <span className="lproj">{info.adp}</span>}
-                </div>
-              );
-            })}
-            <div style={{ marginTop: 14, display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
-              <button className="btn" onClick={pinToBoard}>{pinned ? "Pinned to Draft Room ✓" : "Pin targets to Draft Room"}</button>
-              <button className="btn ghost" onClick={save}>Save roster</button>
-              <button className="btn ghost" onClick={() => copyText(rosterText)}>Copy</button>
+                );
+              })}
+              <div style={{ marginTop: 14, display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+                <button className="btn" onClick={pinToBoard}>{pinned ? "Pinned to Draft Room ✓" : "Pin targets to Draft Room"}</button>
+                <button className="btn ghost" onClick={save}>Save roster</button>
+                <button className="btn ghost" onClick={() => copyText(rosterText)}>Copy</button>
+              </div>
             </div>
-          </div>
-        )}
+          )}
+        </div>
       </div>
 
       {res && res.alternates && res.alternates.length > 0 && (
-        <div className="card">
+        <div className={"card" + (ai.busy ? " airesdim" : "")}>
           <h3>Sleepers &amp; upside alternates</h3>
           {res.alternates.map((a, i) => (
             <div className="alert" key={i}><div className="bar bar-go" /><div className="body"><div className="t">{a.player} <span style={{ color: "var(--muted)", fontWeight: 600 }}>{a.pos}</span></div>{a.note && <div className="s">{a.note}</div>}</div></div>
@@ -2410,7 +2716,7 @@ function RosterBuilder({ cfg, slots, board, setBoard, members, saved, setSaved }
         </div>
       )}
       {res && res.avoid && res.avoid.length > 0 && (
-        <div className="card">
+        <div className={"card" + (ai.busy ? " airesdim" : "")}>
           <h3>Fade / avoid</h3>
           {res.avoid.map((a, i) => (
             <div className="alert" key={i}><div className="bar bar-now" /><div className="body"><div className="t">{a.player}</div>{a.why && <div className="s">{a.why}</div>}</div></div>
@@ -2427,23 +2733,133 @@ function RosterBuilder({ cfg, slots, board, setBoard, members, saved, setSaved }
 /* ---------- Lineup optimizer ---------- */
 function Lineup({ cfg, board, members, slots, setSlots, saved, setSaved }) {
   const roster = activeRoster(members, board);
-  const initAssign = () => (saved && Array.isArray(saved.assign) && saved.assign.length === slots.length) ? saved.assign : slots.map(() => null);
-  const [assign, setAssign] = useState(initAssign);
-  const [meta, setMeta] = useState(saved && saved.meta ? saved.meta : null);
-  const [busy, setBusy] = useState(false);
+  const ai = useAiResult("ai:lineup");
+  const platform = cfg.platform || "Sleeper";
+  const isSleeper = platform === "Sleeper";
+  const isYahoo = platform === "Yahoo";
+
+  const [assign, setAssign] = useState(() => {
+    if (ai.data && Array.isArray(ai.data.assign) && ai.data.assign.length === slots.length) return ai.data.assign;
+    if (saved && Array.isArray(saved.assign) && saved.assign.length === slots.length) return saved.assign;
+    return slots.map(() => null);
+  });
+  const [meta, setMeta] = useState(() => (ai.data && ai.data.meta) || (saved && saved.meta) || null);
   const [err, setErr] = useState("");
   const [submitted, setSubmitted] = useState(!!(saved && saved.submitted));
   const [editSlots, setEditSlots] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [subMsg, setSubMsg] = useState("");
   const [subErr, setSubErr] = useState("");
+  const [current, setCurrent] = useState(() => (ai.data && Array.isArray(ai.data.current) ? ai.data.current : null));
+  const [currentAt, setCurrentAt] = useState(() => (ai.data && ai.data.currentAt) || null);
+  const [currentOk, setCurrentOk] = useState(() => (ai.data ? !!ai.data.currentOk : false));
+  const [currentBusy, setCurrentBusy] = useState(false);
+  const hydratedRef = useRef(false);
+  const readRanRef = useRef(false);
+  const genRanRef = useRef(false);
 
-  const meMember = (members || []).find((m) => m.mine && m.roster && m.roster.length);
-  const canYahoo = (cfg.platform === "Yahoo") && meMember && meMember.teamKey && roster.some((p) => p.playerKey);
+  const meMember = (members || []).find((m) => m.mine);
+  const canYahoo = isYahoo && meMember && meMember.teamKey && roster.some((p) => p.playerKey);
 
-  const generate = async () => {
-    if (!roster.length) { setErr("Set your roster first — import your league and mark your team in the League tab, or draft in Draft Room."); return; }
-    setBusy(true); setErr(""); setSubmitted(false);
+  useEffect(() => {
+    if (!ai.hydrated || hydratedRef.current) return;
+    hydratedRef.current = true;
+    if (ai.data && Array.isArray(ai.data.assign)) {
+      setAssign(ai.data.assign);
+      if (ai.data.meta) setMeta(ai.data.meta);
+    }
+    if (ai.data && Array.isArray(ai.data.current)) {
+      setCurrent(ai.data.current);
+      setCurrentAt(ai.data.currentAt || null);
+      setCurrentOk(!!ai.data.currentOk);
+    }
+  }, [ai.hydrated, ai.data]);
+
+  const persistBundle = async (patch) => {
+    const next = {
+      assign: patch.assign !== undefined ? patch.assign : assign,
+      meta: patch.meta !== undefined ? patch.meta : meta,
+      current: patch.current !== undefined ? patch.current : current,
+      currentAt: patch.currentAt !== undefined ? patch.currentAt : currentAt,
+      currentOk: patch.currentOk !== undefined ? patch.currentOk : currentOk,
+    };
+    await ai.succeed(next);
+    return next;
+  };
+
+  const resolveStarterRow = (pid, playersPool) => {
+    const id = String(pid);
+    const fromRoster = roster.find((p) => p.player_id != null && String(p.player_id) === id);
+    if (fromRoster) return { name: fromRoster.name, pos: fromRoster.pos || "", playerId: id };
+    const p = playersPool && playersPool[id];
+    if (p) {
+      const name = p.full_name || `${p.first_name || ""} ${p.last_name || ""}`.trim() || id;
+      return { name, pos: p.position || "", playerId: id };
+    }
+    return { name: id, pos: "", playerId: id };
+  };
+
+  const readLiveStarters = async () => {
+    setCurrentBusy(true);
+    try {
+      if (isSleeper && cfg.leagueId && meMember && meMember.rosterId != null) {
+        const ids = await getMyStarters(cfg.leagueId, meMember.rosterId);
+        if (!ids) {
+          setCurrentOk(false);
+          if (currentAt) {
+            /* keep last good read */
+          } else {
+            setCurrent(slots.map(() => null));
+          }
+          setCurrentBusy(false);
+          return null;
+        }
+        const pool = await getNflPlayers();
+        const resolved = ids.map((pid) => resolveStarterRow(pid, pool));
+        const bySlot = slots.map((_, i) => resolved[i] || null);
+        const at = Date.now();
+        setCurrent(bySlot);
+        setCurrentAt(at);
+        setCurrentOk(true);
+        setCurrentBusy(false);
+        return { current: bySlot, currentAt: at, currentOk: true };
+      }
+      if (isYahoo) {
+        const at = Date.now();
+        const unavailable = slots.map(() => ({ name: "unavailable — set in Yahoo", pos: "", playerId: "", unavailable: true }));
+        setCurrent(unavailable);
+        setCurrentAt(at);
+        setCurrentOk(false);
+        setCurrentBusy(false);
+        return { current: unavailable, currentAt: at, currentOk: false };
+      }
+      setCurrent(slots.map(() => null));
+      setCurrentOk(false);
+      setCurrentBusy(false);
+      return null;
+    } catch {
+      setCurrentOk(false);
+      setCurrentBusy(false);
+      return null;
+    }
+  };
+
+  const applySuggestion = (names, nextMeta) => {
+    setAssign(names);
+    setMeta(nextMeta);
+  };
+
+  const generate = async (opts = {}) => {
+    if (!roster.length) {
+      setErr("Set your roster first — import your league and mark your team in the League tab, or draft in Draft Room.");
+      return;
+    }
+    const hadPrior = !!(ai.data && ai.data.assign);
+    ai.begin();
+    setErr(""); setSubmitted(false);
+    let live = null;
+    if (!opts.skipRead) live = await readLiveStarters();
+
     const sys = "You are a top-tier fantasy football lineup optimizer for a " + cfg.scoring + " league. If web_search is available, use it for THIS WEEK's matchups, injuries, inactives, and projections. Using ONLY players from my roster, set the optimal starter for each slot and assess my roster. Slots in order: " + slots.join(", ") + ". FLEX = RB/WR/TE; SUPERFLEX = QB/RB/WR/TE. Respond with ONLY JSON, no prose: {\"lineup\":[{\"slot\":\"\",\"player\":\"exact name from my roster\",\"proj\":\"projected pts\",\"why\":\"one line\"}],\"bench\":[{\"player\":\"\",\"why\":\"\"}],\"risks\":[\"injury/inactive flags\"],\"roster_notes\":\"weak spots and add/drop ideas\"}. Use each player at most once. The lineup array must have exactly " + slots.length + " entries in the given slot order.";
     const user = "My roster: " + roster.map((p) => `${p.name} (${p.pos}${p.team ? ", " + p.team : ""})`).join("; ") + ".";
     try {
@@ -2455,37 +2871,99 @@ function Lineup({ cfg, board, members, slots, setSlots, saved, setSaved }) {
         return nm && rosterNames.includes(nm) ? nm : null;
       });
       const byPlayer = {}; lineup.forEach((l) => { if (l.player) byPlayer[l.player] = { proj: l.proj, why: l.why }; });
-      setAssign(next);
-      setMeta({ byPlayer, risks: j.risks || [], notes: j.roster_notes || "" });
+      const nextMeta = { byPlayer, risks: j.risks || [], notes: j.roster_notes || "" };
+      applySuggestion(next, nextMeta);
+      await persistBundle({
+        assign: next,
+        meta: nextMeta,
+        ...(live || {}),
+      });
     } catch (e) {
-      const j = localLineup(roster, slots);
-      const next = slots.map((s, i) => (j.lineup[i] && j.lineup[i].player) ? j.lineup[i].player : null);
-      const byPlayer = {}; j.lineup.forEach((l) => { if (l.player) byPlayer[l.player] = { proj: l.proj, why: l.why }; });
-      setAssign(next);
-      setMeta({ byPlayer, risks: [], notes: j.roster_notes });
-      setErr(advisorError(e) + " Showing a roster-order lineup so you can still edit and copy.");
+      if (hadPrior && !opts.forceLocal) {
+        ai.failKeep();
+        setErr(advisorError(e));
+      } else {
+        const j = localLineup(roster, slots);
+        const next = slots.map((s, i) => (j.lineup[i] && j.lineup[i].player) ? j.lineup[i].player : null);
+        const byPlayer = {}; j.lineup.forEach((l) => { if (l.player) byPlayer[l.player] = { proj: l.proj, why: l.why }; });
+        const nextMeta = { byPlayer, risks: [], notes: j.roster_notes };
+        applySuggestion(next, nextMeta);
+        await persistBundle({
+          assign: next,
+          meta: nextMeta,
+          ...(live || {}),
+        });
+        if (!opts.silent) setErr(advisorError(e) + " Showing a roster-order lineup so you can still compare.");
+      }
     }
-    setBusy(false);
   };
 
-  const swap = (i, name) => {
-    const next = [...assign];
-    if (name) { const j = next.findIndex((a, k) => a === name && k !== i); if (j >= 0) next[j] = next[i]; }
-    next[i] = name || null; setAssign(next); setSubmitted(false);
-  };
-  const removeSlot = (i) => { setSlots(slots.filter((_, j) => j !== i)); setAssign(assign.filter((_, j) => j !== i)); };
-  const addSlot = (pos) => { if (!pos) return; setSlots([...slots, pos]); setAssign([...assign, null]); };
-  const resetSlots = () => { const d = defaultSlots(cfg.format); setSlots(d); setAssign(d.map(() => null)); };
+  useEffect(() => {
+    if (!ai.hydrated || readRanRef.current) return;
+    readRanRef.current = true;
+    (async () => {
+      const live = await readLiveStarters();
+      if (live && (ai.data && ai.data.assign)) {
+        await saveAiResult("ai:lineup", {
+          ...ai.data,
+          ...live,
+          assign: ai.data.assign,
+          meta: ai.data.meta,
+        });
+      }
+      if (!(ai.data && ai.data.assign) && roster.length && !genRanRef.current) {
+        genRanRef.current = true;
+        await generate({ skipRead: true, forceLocal: true, silent: true });
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ai.hydrated, cfg.leagueId, meMember && meMember.rosterId, platform]);
 
-  const bench = roster.filter((p) => !assign.includes(p.name));
-  const lineupText = "Lineup — " + cfg.league + "\n" + slots.map((s, i) => `${s}: ${assign[i] || "—"}`).join("\n");
+  const removeSlot = (i) => { setSlots(slots.filter((_, j) => j !== i)); setAssign(assign.filter((_, j) => j !== i)); setCurrent((c) => (c ? c.filter((_, j) => j !== i) : c)); };
+  const addSlot = (pos) => {
+    if (!pos) return;
+    setSlots([...slots, pos]);
+    setAssign([...assign, null]);
+    setCurrent((c) => (c ? [...c, null] : c));
+  };
+  const resetSlots = () => {
+    const d = defaultSlots(cfg.format);
+    setSlots(d);
+    setAssign(d.map(() => null));
+    setCurrent(null);
+  };
+
+  const nameEq = (a, b) => String(a || "").trim().toLowerCase() === String(b || "").trim().toLowerCase();
+  const changeCount = slots.reduce((n, s, i) => {
+    const sug = assign[i];
+    if (!sug) return n;
+    const cur = current && current[i] ? current[i].name : null;
+    if (!cur || current[i].unavailable) return n; // can't compare
+    return nameEq(cur, sug) ? n : n + 1;
+  }, 0);
+  const hasSuggestions = assign.some(Boolean);
+  const comparable = current && currentOk && current.some((c) => c && c.name && !c.unavailable);
+  const summaryLine = !hasSuggestions
+    ? "Tap Do this for me to get suggestions."
+    : !comparable
+      ? (changeCount === 0 && hasSuggestions ? "Suggestions ready — we couldn't compare to your live lineup." : "Suggestions ready.")
+      : changeCount === 0
+        ? "You're set — no changes needed."
+        : changeCount + " change" + (changeCount === 1 ? "" : "s") + " to make.";
+
+  const lineupText = "Lineup — " + cfg.league + "\n" + slots.map((s, i) => {
+    const sug = assign[i] || "—";
+    const cur = current && current[i] && current[i].name ? current[i].name : "—";
+    return `${s}: now ${cur} → ${sug}`;
+  }).join("\n");
+
   const finalize = () => { setSaved({ assign, meta, submitted: true, at: Date.now() }); setSubmitted(true); };
 
   const submitYahoo = async () => {
     if (!canYahoo) return;
     const nameToKey = {}; roster.forEach((p) => { if (p.playerKey) nameToKey[p.name] = p.playerKey; });
     const starters = slots.map((s, i) => (assign[i] && nameToKey[assign[i]]) ? { playerKey: nameToKey[assign[i]], slot: s } : null).filter(Boolean);
-    const benchP = bench.filter((p) => p.playerKey).map((p) => ({ playerKey: p.playerKey, slot: "BN" }));
+    const benchP = roster.filter((p) => !assign.includes(p.name) && p.playerKey).map((p) => ({ playerKey: p.playerKey, slot: "BN" }));
     setSubmitting(true); setSubErr(""); setSubMsg("");
     try {
       const r = await apiFetch("/api/yahoo/roster", {
@@ -2500,17 +2978,30 @@ function Lineup({ cfg, board, members, slots, setSlots, saved, setSaved }) {
     setSubmitting(false);
   };
 
+  const refreshAll = () => generate({ skipRead: false });
+
+  const readStamp = currentAt
+    ? (isSleeper
+      ? (currentOk ? "Read from Sleeper: " : "Couldn't read Sleeper — last read: ") + fmtGeneratedAt(currentAt)
+      : isYahoo
+        ? "Yahoo live starters unavailable — set in Yahoo"
+        : "Lineup read: " + fmtGeneratedAt(currentAt))
+    : (currentBusy ? "Reading your lineup…" : null);
+
   return (
     <div>
       <div className="card">
         <div className="cardhead">
-          <h3>Lineup optimizer</h3>
-          <DoMe onClick={generate} busy={busy} working="Setting lineup…" />
+          <h3>Lineup</h3>
+          <DoMe onClick={refreshAll} busy={ai.busy || currentBusy} working="Checking…" label="Do this for me" />
         </div>
-        <div className="empty" style={{ paddingTop: 0 }}>
-          Pulls this week's matchups, injuries, and projections, then sets your best starter for every slot from {roster.length ? <b>your {roster.length}-player roster</b> : "your roster"}. Everything's editable before you lock it.
-        </div>
+        <div className="v" style={{ marginBottom: 8 }}>{summaryLine}</div>
+        <AiResultBar at={ai.at} busy={ai.busy} refreshFail={ai.refreshFail} onRefresh={hasSuggestions ? refreshAll : null} show={!!(ai.at || hasSuggestions)} />
+        {readStamp && <div className="eyebrow" style={{ margin: "4px 0 10px" }}>{readStamp}</div>}
         {err && <div className="note" style={{ borderColor: "var(--now)" }}>{err}</div>}
+        {!currentOk && isSleeper && hasSuggestions && (
+          <div className="empty" style={{ paddingTop: 0 }}>Couldn't read your lineup — showing suggestions anyway.</div>
+        )}
 
         <div className="slotedit">
           <button className="btn ghost sm" onClick={() => setEditSlots((v) => !v)}>{editSlots ? "Done editing slots" : "Edit slots"}</button>
@@ -2528,21 +3019,30 @@ function Lineup({ cfg, board, members, slots, setSlots, saved, setSaved }) {
           )}
         </div>
 
-        <div style={{ marginTop: 8 }}>
+        <div className={"lcomptable" + (ai.busy && hasSuggestions ? " airesdim" : "")}>
+          <div className="lcomphead">
+            <span>Position</span>
+            <span>Your lineup now</span>
+            <span>Suggested</span>
+          </div>
           {slots.map((s, i) => {
-            const opts = roster.filter((p) => slotEligible(s, p.pos));
-            const info = meta && meta.byPlayer && assign[i] ? meta.byPlayer[assign[i]] : null;
+            const sug = assign[i];
+            const cur = current && current[i] ? current[i] : null;
+            const curName = cur && cur.name ? cur.name : "—";
+            const same = sug && cur && !cur.unavailable && nameEq(cur.name, sug);
+            const different = sug && cur && !cur.unavailable && !nameEq(cur.name, sug);
+            const info = meta && meta.byPlayer && sug ? meta.byPlayer[sug] : null;
             return (
-              <div className="lrow" key={i}>
+              <div className={"lcomprow" + (different ? " lcompchange" : "")} key={i}>
                 <span className="lslot">{s}</span>
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <select value={assign[i] || ""} onChange={(e) => swap(i, e.target.value)}>
-                    <option value="">— empty —</option>
-                    {opts.map((p) => <option key={p.name} value={p.name}>{p.name} ({p.pos})</option>)}
-                  </select>
-                  {info && info.why && <div className="lwhy">{info.why}</div>}
-                </div>
-                {info && info.proj && <span className="lproj">{info.proj}</span>}
+                <span className="lcompcur">{curName}</span>
+                <span className="lcompsug">
+                  {!sug ? "—"
+                    : same ? <span className="lcompkeep">✓ Keep</span>
+                      : different ? <span className="lcompstart">▸ Start {sug} instead</span>
+                        : <span className="lcompstart">▸ Start {sug}</span>}
+                  {info && info.why && different && <div className="lwhy">{info.why}</div>}
+                </span>
               </div>
             );
           })}
@@ -2558,17 +3058,20 @@ function Lineup({ cfg, board, members, slots, setSlots, saved, setSaved }) {
         )}
         {subMsg && <div className="note" style={{ borderColor: "var(--go)" }}>{subMsg}</div>}
         {subErr && <div className="note" style={{ borderColor: "var(--now)" }}>{subErr}</div>}
+        {isSleeper && (
+          <div className="note">
+            Make these changes in the Sleeper app — we'll confirm them next time you open this.
+          </div>
+        )}
+        {isYahoo && (
+          <div className="note">
+            Yahoo can push the suggested lineup with <b>Submit to Yahoo</b>. Live starters aren't readable here yet — set or confirm in Yahoo if needed.
+          </div>
+        )}
       </div>
 
-      {bench.length > 0 && (
-        <div className="card">
-          <h3>Bench</h3>
-          <div className="rosterline" style={{ margin: 0 }}>{bench.map((p) => `${p.name} (${p.pos})`).join(" · ")}</div>
-        </div>
-      )}
-
       {meta && (meta.risks && meta.risks.length || meta.notes) && (
-        <div className="card">
+        <div className={"card" + (ai.busy && hasSuggestions ? " airesdim" : "")}>
           <h3>Roster check</h3>
           {(meta.risks || []).map((r, i) => (
             <div className="alert" key={i}><div className="bar bar-now" /><div className="body"><div className="t">{r}</div></div></div>
@@ -2576,8 +3079,6 @@ function Lineup({ cfg, board, members, slots, setSlots, saved, setSaved }) {
           {meta.notes && <div className="idea-r" style={{ marginTop: (meta.risks || []).length ? 10 : 0 }}>{meta.notes}</div>}
         </div>
       )}
-
-      <div className="note">The optimizer reads live news at run time; give it a final look before you set it. <b>Yahoo</b> leagues can push the lineup with one tap (Submit to Yahoo). Sleeper and ESPN have no usable write API, so there it's Copy lineup and set it in the app.</div>
     </div>
   );
 }
@@ -2589,17 +3090,23 @@ function Matchup({ cfg, slots, board, members, setSavedLineup }) {
   const meMember = (members || []).find((m) => m.mine);
   const oppKeyOf = (m, i) => (m.rosterId != null ? "r" + m.rosterId : "i" + i);
   const [oppKey, setOppKey] = useState("");
-  const [res, setRes] = useState(null);
-  const [assign, setAssign] = useState(slots.map(() => null));
-  const [busy, setBusy] = useState(false);
+  const ai = useAiResult("ai:matchup");
+  const res = ai.data && ai.data.res ? ai.data.res : null;
+  const [assign, setAssign] = useState(() => (ai.data && ai.data.assign) || slots.map(() => null));
   const [err, setErr] = useState("");
   const [detecting, setDetecting] = useState(false);
   const [detMsg, setDetMsg] = useState("");
   const [used, setUsed] = useState(false);
+  const hydratedRef = useRef(false);
 
   useEffect(() => {
     loadKey("matchup:oppKey", "", false).then((k) => { if (k) setOppKey(k); });
   }, []);
+  useEffect(() => {
+    if (!ai.hydrated || hydratedRef.current) return;
+    hydratedRef.current = true;
+    if (ai.data && ai.data.assign) setAssign(ai.data.assign);
+  }, [ai.hydrated, ai.data]);
   const markOpp = (k) => { setOppKey(k); saveKey("matchup:oppKey", k, false); };
 
   const opp = opponents.find((m, i) => oppKeyOf(m, i) === oppKey);
@@ -2640,30 +3147,38 @@ function Matchup({ cfg, slots, board, members, setSavedLineup }) {
     const target = forcedOpp || opp;
     if (!roster.length) { setErr("Set your roster first — League tab → mark your team, or draft in Draft Room."); return; }
     if (!target) { setErr("Pick your next opponent, or tap Do this for me after marking My team."); return; }
-    setBusy(true); setErr(""); setUsed(false);
+    const hadPrior = !!res;
+    ai.begin(); setErr(""); setUsed(false);
     const oppList = (target.roster && target.roster.length) ? target.roster.map((p) => `${p.name} (${p.pos})`).join(", ") : ("(roster unknown; notes: " + (target.notes || "none") + ")");
     const sys = "You are a top-tier fantasy football matchup strategist for a " + cfg.teams + "-team " + cfg.scoring + " league. It's a head-to-head week. If web_search is available, use it for THIS WEEK's projections, injuries, and matchups. Compare MY roster to my OPPONENT's and tell me how to WIN THIS SPECIFIC matchup. Strategy: if I'm a clear favorite, prioritize safe floors; if I'm an underdog, prioritize high-ceiling boom/bust to lift win probability. Set my lineup for slots in order: " + slots.join(", ") + ", using ONLY my players. Respond with ONLY JSON, no prose: {\"win_prob\":\"e.g. 58%\",\"margin\":\"projected +/- pts\",\"read\":\"edges and gaps vs this opponent\",\"lineup\":[{\"slot\":\"\",\"player\":\"\",\"why\":\"\"}],\"swaps\":[{\"out\":\"\",\"in\":\"\",\"why\":\"\"}],\"waiver_targets\":[{\"player\":\"\",\"pos\":\"\",\"why\":\"exploit their weakness or a better matchup\"}],\"block\":[{\"player\":\"\",\"why\":\"grab so the opponent can't\"}]}. lineup length exactly " + slots.length + ".";
     const user = "My roster: " + roster.map((p) => `${p.name} (${p.pos})`).join(", ") + ". Opponent " + (target.teamName || target.name) + " roster: " + oppList + ".";
     try {
       const j = extractJSON(await callClaudeSearch([{ role: "user", content: user }], { system: sys }));
-      setRes(j);
       const names = roster.map((p) => p.name);
-      setAssign(slots.map((s, i) => (j.lineup && j.lineup[i] && names.includes(j.lineup[i].player)) ? j.lineup[i].player : null));
+      const nextAssign = slots.map((s, i) => (j.lineup && j.lineup[i] && names.includes(j.lineup[i].player)) ? j.lineup[i].player : null);
+      setAssign(nextAssign);
+      await ai.succeed({ res: j, assign: nextAssign, oppKey });
     } catch (e) {
-      const j = localLineup(roster, slots);
-      setRes({
-        win_prob: "—",
-        margin: "",
-        read: advisorError(e) + " This is a naive lineup from your roster vs " + (target.teamName || target.name) + ". Retry Do this for me for a live matchup read.",
-        lineup: j.lineup,
-        swaps: [],
-        waiver_targets: [],
-        block: [],
-      });
-      setAssign(slots.map((s, i) => (j.lineup[i] && j.lineup[i].player) ? j.lineup[i].player : null));
-      setErr("");
+      if (hadPrior) {
+        ai.failKeep();
+        setErr(advisorError(e));
+      } else {
+        const j = localLineup(roster, slots);
+        const fallback = {
+          win_prob: "—",
+          margin: "",
+          read: advisorError(e) + " This is a naive lineup from your roster vs " + (target.teamName || target.name) + ". Retry Do this for me for a live matchup read.",
+          lineup: j.lineup,
+          swaps: [],
+          waiver_targets: [],
+          block: [],
+        };
+        const nextAssign = slots.map((s, i) => (j.lineup[i] && j.lineup[i].player) ? j.lineup[i].player : null);
+        setAssign(nextAssign);
+        await ai.succeed({ res: fallback, assign: nextAssign, oppKey });
+        setErr("");
+      }
     }
-    setBusy(false);
   };
 
   const doMe = async () => {
@@ -2691,14 +3206,15 @@ function Matchup({ cfg, slots, board, members, setSavedLineup }) {
             ))}
           </select>
           {cfg.platform === "Sleeper" && <button className="btn ghost" onClick={detect} disabled={detecting}>{detecting && <span className="spin" />}Detect</button>}
-          <DoMe onClick={doMe} busy={busy || detecting} working="Planning…" />
+          <DoMe onClick={doMe} busy={ai.busy || detecting} working="Planning…" />
         </div>
         {opponents.length === 0 && <div className="note">Import your league in the <b>League</b> tab first so I know who you're up against. After import, every other manager shows up in this menu.</div>}
         {detMsg && <div className="note">{detMsg}</div>}
+        <AiResultBar at={ai.at} busy={ai.busy} refreshFail={ai.refreshFail} onRefresh={res ? () => generate() : null} show={!!(res || ai.at)} />
         {err && <div className="note" style={{ borderColor: "var(--now)" }}>{err}</div>}
 
         {res && (
-          <div style={{ marginTop: 6 }}>
+          <div className={ai.busy ? "airesdim" : undefined} style={{ marginTop: 6 }}>
             <div style={{ display: "flex", alignItems: "flex-end", gap: 16, flexWrap: "wrap", padding: "6px 0 12px" }}>
               <div>
                 <div className="eyebrow">Win probability vs {opp && (opp.teamName || opp.name)}</div>
