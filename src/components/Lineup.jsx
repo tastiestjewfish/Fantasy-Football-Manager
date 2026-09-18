@@ -1,8 +1,7 @@
 import React, { useState, useEffect, useRef } from "react";
 import { getMyStarters, getNflPlayers } from "../sleeper";
 import { apiFetch, errFromApiBody } from "../api";
-import { activeRoster, localLineup, slotEligible, defaultSlots } from "../lib/lineup.js";
-import { callClaudeSearch, advisorError, extractJSON } from "../lib/ai.js";
+import { activeRoster, optimizeLineup, defaultSlots, FALLBACK_NOTE } from "../lib/lineup.js";
 import { fmtGeneratedAt, copyText } from "../lib/format.js";
 import { saveAiResult } from "../lib/storage.js";
 import { AiResultBar, DoMe, useAiResult } from "./shared.jsx";
@@ -137,41 +136,53 @@ function Lineup({ cfg, board, members, slots, setSlots, saved, setSaved }) {
     setErr(""); setSubmitted(false);
     let live = null;
     if (!opts.skipRead) live = await readLiveStarters();
+    const currentRows = (live && live.current) || current;
 
-    const sys = "You are a top-tier fantasy football lineup optimizer for a " + cfg.scoring + " league. If web_search is available, use it for THIS WEEK's matchups, injuries, inactives, and projections. Using ONLY players from my roster, set the optimal starter for each slot and assess my roster. Slots in order: " + slots.join(", ") + ". FLEX = RB/WR/TE; SUPERFLEX = QB/RB/WR/TE. Respond with ONLY JSON, no prose: {\"lineup\":[{\"slot\":\"\",\"player\":\"exact name from my roster\",\"proj\":\"projected pts\",\"why\":\"one line\"}],\"bench\":[{\"player\":\"\",\"why\":\"\"}],\"risks\":[\"injury/inactive flags\"],\"roster_notes\":\"weak spots and add/drop ideas\"}. Use each player at most once. The lineup array must have exactly " + slots.length + " entries in the given slot order.";
-    const user = "My roster: " + roster.map((p) => `${p.name} (${p.pos}${p.team ? ", " + p.team : ""})`).join("; ") + ".";
     try {
-      const j = extractJSON(await callClaudeSearch([{ role: "user", content: user }], { system: sys }));
-      const lineup = Array.isArray(j.lineup) ? j.lineup : [];
-      const rosterNames = roster.map((p) => p.name);
-      const next = slots.map((s, i) => {
-        const nm = lineup[i] && lineup[i].player;
-        return nm && rosterNames.includes(nm) ? nm : null;
+      const result = await optimizeLineup({
+        roster,
+        slots,
+        currentStarters: currentRows,
+        scoring: cfg.scoring,
+        useAi: !opts.forceLocal,
       });
-      const byPlayer = {}; lineup.forEach((l) => { if (l.player) byPlayer[l.player] = { proj: l.proj, why: l.why }; });
-      const nextMeta = { byPlayer, risks: j.risks || [], notes: j.roster_notes || "" };
-      applySuggestion(next, nextMeta);
+      applySuggestion(result.assign, result.meta);
       await persistBundle({
-        assign: next,
-        meta: nextMeta,
+        assign: result.assign,
+        meta: {
+          ...result.meta,
+          changeCount: result.changeCount,
+          source: result.source,
+          note: result.note,
+        },
         ...(live || {}),
       });
+      if (result.note && !opts.silent) setErr(result.note);
+      else setErr("");
     } catch (e) {
       if (hadPrior && !opts.forceLocal) {
         ai.failKeep();
-        setErr(advisorError(e));
+        setErr((e && e.message) || "Couldn't build a lineup.");
       } else {
-        const j = localLineup(roster, slots);
-        const next = slots.map((s, i) => (j.lineup[i] && j.lineup[i].player) ? j.lineup[i].player : null);
-        const byPlayer = {}; j.lineup.forEach((l) => { if (l.player) byPlayer[l.player] = { proj: l.proj, why: l.why }; });
-        const nextMeta = { byPlayer, risks: [], notes: j.roster_notes };
-        applySuggestion(next, nextMeta);
-        await persistBundle({
-          assign: next,
-          meta: nextMeta,
-          ...(live || {}),
-        });
-        if (!opts.silent) setErr(advisorError(e) + " Showing a roster-order lineup so you can still compare.");
+        try {
+          const result = await optimizeLineup({
+            roster,
+            slots,
+            currentStarters: currentRows,
+            scoring: cfg.scoring,
+            useAi: false,
+          });
+          applySuggestion(result.assign, result.meta);
+          await persistBundle({
+            assign: result.assign,
+            meta: { ...result.meta, changeCount: result.changeCount, source: "local", note: FALLBACK_NOTE },
+            ...(live || {}),
+          });
+          if (!opts.silent) setErr(FALLBACK_NOTE);
+        } catch (e2) {
+          ai.end();
+          if (!opts.silent) setErr((e2 && e2.message) || FALLBACK_NOTE);
+        }
       }
     }
   };
@@ -276,7 +287,10 @@ function Lineup({ cfg, board, members, slots, setSlots, saved, setSaved }) {
         <div className="v" style={{ marginBottom: 8 }}>{summaryLine}</div>
         <AiResultBar at={ai.at} busy={ai.busy} refreshFail={ai.refreshFail} onRefresh={hasSuggestions ? refreshAll : null} show={!!(ai.at || hasSuggestions)} />
         {readStamp && <div className="eyebrow" style={{ margin: "4px 0 10px" }}>{readStamp}</div>}
-        {err && <div className="note" style={{ borderColor: "var(--now)" }}>{err}</div>}
+        {err && <div className="note" style={{ borderColor: err === FALLBACK_NOTE ? "var(--soon)" : "var(--now)" }}>{err}</div>}
+        {meta && meta.note && err !== meta.note && (
+          <div className="note" style={{ borderColor: "var(--soon)" }}>{meta.note}</div>
+        )}
         {!currentOk && isSleeper && hasSuggestions && (
           <div className="empty" style={{ paddingTop: 0 }}>Couldn't read your lineup — showing suggestions anyway.</div>
         )}

@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from "react";
 import { resolveNextOpponent, sleeperNextOpponent } from "../lib/league.js";
-import { activeRoster, localLineup, slotEligible } from "../lib/lineup.js";
+import { activeRoster, localLineup, slotEligible, enrichRosterWithRanks } from "../lib/lineup.js";
 import { callClaudeSearch, advisorError, extractJSON } from "../lib/ai.js";
 import { loadKey, saveKey } from "../lib/storage.js";
 import { copyText } from "../lib/format.js";
@@ -87,11 +87,12 @@ function Matchup({ cfg, slots, board, members, setSavedLineup }) {
         ai.failKeep();
         setErr(advisorError(e));
       } else {
-        const j = localLineup(roster, slots);
+        const ranked = await enrichRosterWithRanks(roster);
+        const j = localLineup(ranked, slots);
         const fallback = {
           win_prob: "—",
           margin: "",
-          read: advisorError(e) + " This is a naive lineup from your roster vs " + (target.teamName || target.name) + ". Retry Do this for me for a live matchup read.",
+          read: "Using our backup ranking — live advice was unavailable. Lineup vs " + (target.teamName || target.name) + " from ranks.",
           lineup: j.lineup,
           swaps: [],
           waiver_targets: [],

@@ -1,15 +1,15 @@
 import React, { useState, useEffect, useRef } from "react";
-import { getMyStarters } from "../sleeper";
-import { loadKey, saveKey } from "../lib/storage.js";
+import { getMyStarters, getNflPlayers, sleeperPlayerDisplayName } from "../sleeper";
+import { loadKey, saveKey, saveAiResult } from "../lib/storage.js";
 import { fmtCountdown, fmtGeneratedAt, copyText } from "../lib/format.js";
-import { activeRoster } from "../lib/lineup.js";
+import { activeRoster, optimizeLineup } from "../lib/lineup.js";
 import { resolveNextOpponent } from "../lib/league.js";
 import { callClaudeSearch, extractJSON, advisorError, aiWeekKey } from "../lib/ai.js";
 import { AiResultBar, DoMe, useAiResult } from "./shared.jsx";
 
 
 const COACH_SYS = (teams, scoring, format) =>
-  "You are a friendly fantasy football helper for a beginner in a " + teams + "-team " + scoring + " league (" + format + "). Head-to-head. If web_search is available, use it for THIS WEEK's projections, injuries, inactives, and news. Using my roster, my next opponent, and brief notes on other teams, tell me EXACTLY what to do this week — a SHORT prioritized action list, most important first. Only include actions that need doing now; if nothing needs changing, set allSet true and actions []. Write like texting a friend who has never played fantasy. NEVER use abbreviations (no FLEX, WR, RB, TE, QB, PPR, ADP, FAAB) or jargon (no optimize, leverage, matchup edge, ceiling, floor). Spell out positions in full words if needed. For lineup advice, say exactly who to put in the starting lineup. For trades, name the manager and the exact offer. Respond with ONLY JSON, no prose: {\"deadline\":\"e.g. Lineup locks Sun 1:00pm ET\",\"allSet\":false,\"actions\":[{\"type\":\"lineup|trade|waiver|drop|none\",\"priority\":1,\"verdict\":\"plain imperative, e.g. Put Puka Nacua in your starting lineup\",\"why\":\"one or two beginner-friendly sentences\",\"copy\":\"optional text to copy, e.g. a trade message to send\"}]}";
+  "You are a friendly fantasy football helper for a beginner in a " + teams + "-team " + scoring + " league (" + format + "). Head-to-head. If web_search is available, use it for THIS WEEK's projections, injuries, inactives, and news. Using my roster, my next opponent, and brief notes on other teams, tell me EXACTLY what to do this week — a SHORT prioritized action list, most important first. Only include actions that need doing now; if nothing needs changing, set allSet true and actions []. Write like texting a friend who has never played fantasy. NEVER use abbreviations (no FLEX, WR, RB, TE, QB, PPR, ADP, FAAB) or jargon (no optimize, leverage, matchup edge, ceiling, floor). Spell out positions in full words if needed. Do NOT give lineup start/sit advice — lineup is handled separately. For trades, name the manager and the exact offer. Respond with ONLY JSON, no prose: {\"deadline\":\"e.g. Lineup locks Sun 1:00pm ET\",\"allSet\":false,\"actions\":[{\"type\":\"trade|waiver|drop|none\",\"priority\":1,\"verdict\":\"plain imperative\",\"why\":\"one or two beginner-friendly sentences\",\"copy\":\"optional text to copy, e.g. a trade message to send\"}]}";
 
 async function fetchCoachAdvice({ cfg, board, members, slots, nextDeadline }) {
   const roster = activeRoster(members, board);
@@ -28,8 +28,34 @@ async function fetchCoachAdvice({ cfg, board, members, slots, nextDeadline }) {
     others ? "Other teams (top names):\n" + others : "",
   ].filter(Boolean).join("\n");
   const j = extractJSON(await callClaudeSearch([{ role: "user", content: user }], { system: COACH_SYS(cfg.teams, cfg.scoring, cfg.format) }));
-  const actions = (Array.isArray(j.actions) ? j.actions : []).slice().sort((a, b) => (a.priority || 99) - (b.priority || 99));
+  const actions = (Array.isArray(j.actions) ? j.actions : [])
+    .filter((a) => String(a.type || "").toLowerCase() !== "lineup")
+    .slice()
+    .sort((a, b) => (a.priority || 99) - (b.priority || 99));
   return { deadline: j.deadline || (nextDeadline ? nextDeadline.label : ""), allSet: !!j.allSet, actions };
+}
+
+async function readCurrentStartersForSlots({ cfg, members, slots, roster }) {
+  const me = (members || []).find((m) => m.mine);
+  if ((cfg.platform || "Sleeper") !== "Sleeper" || !cfg.leagueId || !me || me.rosterId == null) {
+    return slots.map(() => null);
+  }
+  const ids = await getMyStarters(cfg.leagueId, me.rosterId);
+  if (!ids) return slots.map(() => null);
+  let pool = {};
+  try { pool = await getNflPlayers(); } catch { pool = {}; }
+  return slots.map((_, i) => {
+    const pid = ids[i];
+    if (pid == null || pid === "" || pid === "0") return null;
+    const id = String(pid);
+    const fromRoster = (roster || []).find((p) => p.player_id != null && String(p.player_id) === id);
+    if (fromRoster) return { name: fromRoster.name, pos: fromRoster.pos || "", playerId: id };
+    const p = pool[id];
+    if (p) {
+      return { name: sleeperPlayerDisplayName(p, id), pos: p.position || "", playerId: id };
+    }
+    return { name: id, pos: "", playerId: id };
+  });
 }
 
 function coachActionKey(a) {
@@ -127,7 +153,54 @@ function Home({
     const hadPrior = data != null;
     ai.begin(); setErr(""); setOpenWhy({}); setOpenHow({}); setCopied(null);
     try {
-      const next = await fetchCoachAdvice({ cfg, board, members, slots, nextDeadline });
+      const roster = activeRoster(members, board);
+      const currentStarters = await readCurrentStartersForSlots({ cfg, members, slots, roster });
+      const lineupOpt = await optimizeLineup({
+        roster,
+        slots,
+        currentStarters,
+        scoring: cfg.scoring,
+        useAi: true,
+      });
+      // Keep Lineup screen in sync with the same shared result
+      await saveAiResult("ai:lineup", {
+        assign: lineupOpt.assign,
+        meta: {
+          ...lineupOpt.meta,
+          changeCount: lineupOpt.changeCount,
+          source: lineupOpt.source,
+          note: lineupOpt.note,
+        },
+        current: currentStarters,
+        currentAt: Date.now(),
+        currentOk: currentStarters.some((c) => c && c.name),
+      });
+
+      let coach = { deadline: nextDeadline ? nextDeadline.label : "", allSet: true, actions: [] };
+      try {
+        coach = await fetchCoachAdvice({ cfg, board, members, slots, nextDeadline });
+      } catch { /* lineup still works without coach extras */ }
+
+      const lineupActions = (lineupOpt.changes || []).map((c, i) => ({
+        type: "lineup",
+        priority: i + 1,
+        verdict: c.verdict,
+        why: c.why,
+        slot: c.slot,
+        from: c.from,
+        to: c.to,
+      }));
+      const otherActions = (coach.actions || [])
+        .filter((a) => String(a.type || "").toLowerCase() !== "lineup")
+        .map((a, i) => ({ ...a, priority: lineupActions.length + i + 1 }));
+      const actions = [...lineupActions, ...otherActions];
+      const next = {
+        deadline: coach.deadline || (nextDeadline ? nextDeadline.label : ""),
+        allSet: actions.length === 0,
+        actions,
+        lineupNote: lineupOpt.note || null,
+        lineupChangeCount: lineupOpt.changeCount,
+      };
       await ai.succeed(next);
     } catch (e) {
       if (hadPrior) ai.failKeep();
@@ -312,6 +385,9 @@ function Home({
       <div className="homestatus" style={{ marginTop: todoCount > 0 ? 12 : 16 }}>{statusLine}</div>
 
       <AiResultBar at={ai.at} busy={ai.busy} refreshFail={ai.refreshFail} onRefresh={data || err ? run : null} show={!!(data || err || ai.at)} />
+      {data && data.lineupNote && (
+        <div className="note" style={{ borderColor: "var(--soon)" }}>{data.lineupNote}</div>
+      )}
 
       {ai.busy && !data && (
         <div className="card">
