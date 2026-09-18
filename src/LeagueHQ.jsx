@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, Suspense, lazy } from "react";
+import React, { useState, useEffect, useRef, useCallback, Suspense, lazy } from "react";
 import { getWorkspaceId } from "./firebase";
 import { nflSeasonClock } from "./sleeper";
 import { isWinningIntel } from "./gmail";
@@ -7,7 +7,7 @@ import { loadKey, saveKey, preloadAiResults } from "./lib/storage.js";
 import { urgencyFor, computeDeadlines, fmtRefreshAgo } from "./lib/format.js";
 import { defaultSlots, resolveSlots } from "./lib/lineup.js";
 import {
-  loadAnthropicWorkspaceId, loadUseWebSearch,
+  loadAnthropicWorkspaceId, loadUseWebSearch, aiWeekKey,
 } from "./lib/ai.js";
 import {
   DEFAULT_CFG, DEFAULT_REM, defaultSources,
@@ -15,6 +15,7 @@ import {
   loadLeagueBundle, writeLeagueBundle, draftToolsVisible,
   importSleeper, mergeImportedMembers,
 } from "./lib/league.js";
+import { ensureWeeklyPlan } from "./lib/weeklyPlan.js";
 
 import { SpearMark, LeaguePicker, AddLeague } from "./components/shared.jsx";
 import ErrorBoundary from "./components/ErrorBoundary.jsx";
@@ -71,8 +72,12 @@ export default function LeagueHQ({ user, onSignOut }) {
   const [activeId, setActiveId] = useState("default");
   const [pickerOpen, setPickerOpen] = useState(false);
   const [addingLeague, setAddingLeague] = useState(false);
+  const [plan, setPlan] = useState(null);
+  const [planBusy, setPlanBusy] = useState(false);
   const activeIdRef = useRef("default");
   const switchingRef = useRef(false);
+  const planRef = useRef(null);
+  const planBusyRef = useRef(false);
 
   const applyBundle = (bundle, leagueId) => {
     setCfg(bundle.cfg);
@@ -189,6 +194,8 @@ export default function LeagueHQ({ user, onSignOut }) {
     applyBundle(bundle, id);
     activeIdRef.current = id;
     setActiveId(id);
+    planRef.current = null;
+    setPlan(null);
     saveKey("me:activeLeagueId", id, false);
     switchingRef.current = false;
     setRefreshing(false);
@@ -223,6 +230,31 @@ export default function LeagueHQ({ user, onSignOut }) {
   const deadlines = computeDeadlines(rem);
   const nextDeadline = deadlines[0];
   const heroState = nextDeadline ? urgencyFor(nextDeadline.when) : "go";
+
+  const ensurePlan = useCallback(async (opts = {}) => {
+    const force = !!opts.force;
+    if (!force && planRef.current && clock && planRef.current.week === aiWeekKey(clock)) {
+      return planRef.current;
+    }
+    if (planBusyRef.current && !force) return planRef.current;
+    planBusyRef.current = true;
+    setPlanBusy(true);
+    try {
+      const next = await ensureWeeklyPlan({
+        cfg, members, slots, board, clock, nextDeadline, activeId,
+      }, { force });
+      planRef.current = next;
+      setPlan(next);
+      return next;
+    } finally {
+      planBusyRef.current = false;
+      setPlanBusy(false);
+    }
+  }, [cfg, members, slots, board, clock, nextDeadline, activeId]);
+
+  const refreshPlan = useCallback(() => ensurePlan({ force: true }), [ensurePlan]);
+
+  const planProps = { plan, planBusy, refreshPlan, ensurePlan };
 
   const showDraft = draftToolsVisible(cfg, members, clock);
   const TABS = [
@@ -327,29 +359,43 @@ export default function LeagueHQ({ user, onSignOut }) {
         {tabShown === "home" && (
           <Home
             cfg={cfg}
-            board={board}
             members={members}
-            slots={slots}
             nextDeadline={nextDeadline}
             clock={clock}
-            lastRefresh={lastRefresh}
             go={go}
             onStartSetup={restartOnboarding}
             onOpenTools={() => setToolsOpen(true)}
+            {...planProps}
           />
         )}
         {tabShown === "week" && pane === "lineup" && (
           <Suspense fallback={<TabFallback />}>
-            <Lineup cfg={cfg} board={board} members={members} slots={slots} setSlots={persistSlots} saved={savedLineup} setSaved={persistSavedLineup} />
+            <Lineup
+              cfg={cfg}
+              board={board}
+              members={members}
+              slots={slots}
+              setSlots={persistSlots}
+              saved={savedLineup}
+              setSaved={persistSavedLineup}
+              {...planProps}
+            />
           </Suspense>
         )}
         {tabShown === "week" && pane === "matchup" && (
           <Suspense fallback={<TabFallback />}>
-            <Matchup cfg={cfg} slots={slots} board={board} members={members} setSavedLineup={persistSavedLineup} />
+            <Matchup
+              cfg={cfg}
+              slots={slots}
+              board={board}
+              members={members}
+              setSavedLineup={persistSavedLineup}
+              {...planProps}
+            />
           </Suspense>
         )}
         {tabShown === "week" && pane === "start" && (
-          <Moves cfg={cfg} board={board} members={members} pane="start" />
+          <Moves cfg={cfg} board={board} members={members} pane="start" {...planProps} />
         )}
         {tabShown === "moves" && pane === "trades" && (
           <Suspense fallback={<TabFallback />}>
@@ -357,7 +403,7 @@ export default function LeagueHQ({ user, onSignOut }) {
           </Suspense>
         )}
         {tabShown === "moves" && (pane === "waiver" || pane === "byes") && (
-          <Moves cfg={cfg} board={board} members={members} pane={pane} />
+          <Moves cfg={cfg} board={board} members={members} pane={pane} {...planProps} />
         )}
         {tabShown === "league" && pane === "teams" && (
           <League cfg={cfg} setCfg={persistCfg} members={members} setMembers={persistMembers} setSlots={persistSlots} />
