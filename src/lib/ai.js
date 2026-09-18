@@ -1,6 +1,5 @@
 import { apiFetch, errText, errFromApiBody } from "../api";
-import storage from "../storage";
-import { loadKey, saveKey } from "./storage.js";
+import storage, { loadKey, saveKey } from "./storage.js";
 
 const MODEL_FAST = "claude-haiku-4-5";
 const MODEL_SMART = "claude-sonnet-4-6";

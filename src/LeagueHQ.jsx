@@ -17,16 +17,17 @@ import {
 } from "./lib/league.js";
 
 import { SpearMark, LeaguePicker, AddLeague } from "./components/shared.jsx";
+import ErrorBoundary from "./components/ErrorBoundary.jsx";
 import Home from "./components/Home.jsx";
 import Onboarding from "./components/Onboarding.jsx";
 import Inbox from "./components/Inbox.jsx";
 import Reminders from "./components/Reminders.jsx";
 import Moves from "./components/Moves.jsx";
 import League from "./components/League.jsx";
-import Lineup from "./components/Lineup.jsx";
 import Setup from "./components/Setup.jsx";
 
 /* Heavier / less-frequent screens — split out of the first-load chunk */
+const Lineup = lazy(() => import("./components/Lineup.jsx"));
 const DraftRoom = lazy(() => import("./components/DraftRoom.jsx"));
 const RosterBuilder = lazy(() => import("./components/RosterBuilder.jsx"));
 const Matchup = lazy(() => import("./components/Matchup.jsx"));
@@ -322,6 +323,7 @@ export default function LeagueHQ({ user, onSignOut }) {
             ))}
           </div>
         )}
+        <ErrorBoundary key={tabShown + ":" + (pane || "")}>
         {tabShown === "home" && (
           <Home
             cfg={cfg}
@@ -337,7 +339,9 @@ export default function LeagueHQ({ user, onSignOut }) {
           />
         )}
         {tabShown === "week" && pane === "lineup" && (
-          <Lineup cfg={cfg} board={board} members={members} slots={slots} setSlots={persistSlots} saved={savedLineup} setSaved={persistSavedLineup} />
+          <Suspense fallback={<TabFallback />}>
+            <Lineup cfg={cfg} board={board} members={members} slots={slots} setSlots={persistSlots} saved={savedLineup} setSaved={persistSavedLineup} />
+          </Suspense>
         )}
         {tabShown === "week" && pane === "matchup" && (
           <Suspense fallback={<TabFallback />}>
@@ -393,6 +397,7 @@ export default function LeagueHQ({ user, onSignOut }) {
             />
           </>
         )}
+        </ErrorBoundary>
       </main>
 
       {!onboarded && (

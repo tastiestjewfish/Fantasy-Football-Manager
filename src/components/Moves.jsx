@@ -1,8 +1,17 @@
-import React, { useState } from "react";
+import React, { useState, Suspense, lazy } from "react";
 import { activeRoster } from "../lib/lineup.js";
 import { callClaude, advisorError, MODEL_FAST } from "../lib/ai.js";
 import { AiResultBar, DoMe, useAiResult } from "./shared.jsx";
-import WaiversList from "./WaiversList.jsx";
+
+const WaiversList = lazy(() => import("./WaiversList.jsx"));
+
+function WaiversFallback() {
+  return (
+    <div className="empty" style={{ padding: 8, display: "flex", alignItems: "center" }}>
+      <span className="spin" /> Loading…
+    </div>
+  );
+}
 
 
 function Moves({ cfg, board, members, pane = "start" }) {
@@ -49,7 +58,11 @@ function Moves({ cfg, board, members, pane = "start" }) {
           {outStart && <div className={"out" + (ai.busy ? " airesdim" : "")}>{outStart}</div>}
         </div>
       )}
-      {tabm === "waiver" && <WaiversList cfg={cfg} members={members} />}
+      {tabm === "waiver" && (
+        <Suspense fallback={<WaiversFallback />}>
+          <WaiversList cfg={cfg} members={members} />
+        </Suspense>
+      )}
       {tabm === "byes" && (
         <div>
           {byeWeeks.length === 0 ? (
